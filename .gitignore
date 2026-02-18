@@ -11,3 +11,6 @@ cos_config.yaml
 
 #result-outputs
 /results
+
+#data caches
+/data
