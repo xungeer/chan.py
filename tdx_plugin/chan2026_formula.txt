@@ -1,0 +1,59 @@
+================================================================================
+通达信辅助公式：FBASE_CHAN (用于跨周期引用笔标记)
+================================================================================
+{公式名称：FBASE_CHAN}
+{参数设置：无}
+BI: TDXDLL2(1, H, L, 0); {调用第1号函数：笔标记，返回1或-1}
+LAST_BI:= BARSLAST(BI<>0);
+BI_VAL: REF(BI, LAST_BI); { 输出持续的状态1或-1，以便跨周期引用不丢失 }
+
+
+================================================================================
+通达信主图公式：缠论画图2026
+================================================================================
+{公式名称：缠论画图2026}
+{主图叠加}
+
+{1. 本级别的笔绘制}
+BI:=TDXDLL2(1, H, L, 0);
+DRAWLINE(BI=1, H, BI=-1, L, 0), COLORA0A0A0, LINETHICK1;
+DRAWLINE(BI=-1, L, BI=1, H, 0), COLORA0A0A0, LINETHICK1;
+
+{2. 本级别段绘制}
+SEG:=TDXDLL2(6, BI, H, L);
+DRAWLINE(SEG=1, H, SEG=-1, L, 0), COLOR3C4CE7, LINETHICK2;
+DRAWLINE(SEG=-1, L, SEG=1, H, 0), COLOR3C4CE7, LINETHICK2;
+
+{3. 本级别中枢绘制}
+ZS_H:=TDXDLL2(2, BI, H, L);
+ZS_L:=TDXDLL2(3, BI, H, L);
+ZS_FLAG:=TDXDLL2(4, BI, H, L);
+
+{完整的矩形中枢框绘制：利用 DRAWLINE 画横向箱体上下表面，利用 STICKLINE 画闭合左右边界}
+DRAWLINE(ZS_FLAG=1, ZS_H, ZS_FLAG=2, ZS_H, 0), COLORC19C72; {中枢上沿，雅致青灰色}
+DRAWLINE(ZS_FLAG=1, ZS_L, ZS_FLAG=2, ZS_L, 0), COLORC19C72; {中枢下沿}
+STICKLINE(ZS_FLAG=1, ZS_H, ZS_L, 0, 0), COLORC19C72;        {中枢左侧起始竖线}
+STICKLINE(ZS_FLAG=2, ZS_H, ZS_L, 0, 0), COLORC19C72;        {中枢右侧终结竖线}
+
+{4. 跨级别（下级别）笔绘制}
+{引用下级别的持续状态标记，支持跨不同周期且防止丢点}
+SUB_BI_1M:="FBASE_CHAN.BI_VAL#MIN1";
+SUB_BI_5M:="FBASE_CHAN.BI_VAL#MIN5";
+SUB_BI_15M:="FBASE_CHAN.BI_VAL#MIN15";
+SUB_BI_30M:="FBASE_CHAN.BI_VAL#MIN30";
+SUB_BI_60M:="FBASE_CHAN.BI_VAL#MIN60";
+SUB_BI_DAY:="FBASE_CHAN.BI_VAL#DAY";
+
+{可以选择你想看的跨周期级别，例如默认显示5分钟级别的笔}
+MAPPED_SUB_BI:=TDXDLL2(7, SUB_BI_5M, 0, 0); {跨周期分解映射}
+DRAWLINE(MAPPED_SUB_BI=1, H, MAPPED_SUB_BI=-1, L, 0), COLORDB9834, DOTLINE;
+DRAWLINE(MAPPED_SUB_BI=-1, L, MAPPED_SUB_BI=1, H, 0), COLORDB9834, DOTLINE;
+
+{5. 买卖点标记}
+BSP:=TDXDLL2(5, BI, H, L);
+DRAWTEXT(BSP=1, L*0.99, '1买'), COLOR2B39C0;
+DRAWTEXT(BSP=2, L*0.99, '2买'), COLORAD448E;
+DRAWTEXT(BSP=3, L*0.99, '3买'), COLOR0054D3;
+DRAWTEXT(BSP=11, H*1.01, '1卖'), COLOR60AE27;
+DRAWTEXT(BSP=12, H*1.01, '2卖'), COLORB98029;
+DRAWTEXT(BSP=13, H*1.01, '3卖'), COLOR503E2C;
