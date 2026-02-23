@@ -96,6 +96,19 @@ void Func1(int nCount, float *pOut, float *pHigh, float *pLow, float *pExt) {
     }
 }
 
+// 中枢信息结构体
+struct ZSInfo {
+    int start_idx;      // 中枢起始K线索引 (points数组中的K线位置)
+    int end_idx;        // 中枢结束K线索引
+    int start_pt;       // 中枢起始在points数组中的索引
+    int end_pt;         // 中枢结束在points数组中的索引
+    float zg;           // 中枢上沿 (ZG)
+    float zd;           // 中枢下沿 (ZD)
+    float peak_high;    // 中枢内笔的最高价
+    float peak_low;     // 中枢内笔的最低价
+    int seg_idx;        // 所属线段索引 (同段才能合并)
+};
+
 // 通用分析函数：提取段、中枢及买卖点
 void CalculateChanElements(int nCount, float* pIn, float* pHigh, float* pLow, float* pOut, int type) {
     if (nCount <= 0) return;
@@ -116,89 +129,231 @@ void CalculateChanElements(int nCount, float* pIn, float* pHigh, float* pLow, fl
     std::vector<float> bsp(nCount, 0.0f);
     std::vector<float> seg(nCount, 0.0f);
 
-    int last_zs_end = -1;
-
-    // 更好的段划分 (包含至少3笔的反向突破线段)
+    // ---- 段划分 (包含至少3笔的反向突破线段) ----
     if (points.size() > 0) {
-        int last_seg_k = 0; // index in points array
+        int last_seg_k = 0;
         seg[points[last_seg_k]] = pIn[points[last_seg_k]];
         
         for (size_t k = 1; k < points.size(); ++k) {
             int idx = points[k];
             if (pIn[idx] != pIn[points[last_seg_k]]) {
-                // 方向相反，必须间隔至少3笔才能成段（即k - last_seg_k >= 3）
                 if (k - last_seg_k >= 3) {
                     seg[idx] = pIn[idx];
                     last_seg_k = k;
                 }
             } else {
-                // 方向相同，延伸段的极值点
                 if (pIn[idx] == 1.0f && pHigh[idx] > pHigh[points[last_seg_k]]) {
-                    seg[points[last_seg_k]] = 0.0f; // 清除之前的顶点
-                    seg[idx] = 1.0f;                // 标记新的顶点
+                    seg[points[last_seg_k]] = 0.0f;
+                    seg[idx] = 1.0f;
                     last_seg_k = k;
                 } else if (pIn[idx] == -1.0f && pLow[idx] < pLow[points[last_seg_k]]) {
-                    seg[points[last_seg_k]] = 0.0f; 
-                    seg[idx] = -1.0f;               
+                    seg[points[last_seg_k]] = 0.0f;
+                    seg[idx] = -1.0f;
                     last_seg_k = k;
                 }
             }
         }
     }
 
-    // 中枢计算逻辑 (3笔重叠)
-    for (size_t i = 0; i < points.size() - 3; ++i) {
-        if ((int)i < last_zs_end) continue;
+    // ---- 为每个笔端点分配所属线段索引 ----
+    std::vector<int> seg_endpoints; // 段端点在K线中的位置
+    for (int i = 0; i < nCount; ++i) {
+        if (seg[i] != 0.0f) seg_endpoints.push_back(i);
+    }
+    // 为每个笔端点计算 seg_idx：它落在哪两个相邻段端点之间
+    auto get_seg_idx = [&](int kline_idx) -> int {
+        for (size_t s = 0; s + 1 < seg_endpoints.size(); ++s) {
+            if (kline_idx >= seg_endpoints[s] && kline_idx <= seg_endpoints[s + 1])
+                return (int)s;
+        }
+        // 如果在最后一段之后（未完成的段），返回最后一段索引
+        return seg_endpoints.empty() ? 0 : (int)seg_endpoints.size() - 1;
+    };
 
-        int p0 = points[i];
-        int p1 = points[i+1];
-        int p2 = points[i+2];
-        int p3 = points[i+3];
+    // ---- over_seg 中枢检测 (对齐 Python ZSList.update_overseg_zs) ----
+    std::vector<ZSInfo> zs_list;
+    std::vector<int> free_bi; // 空闲笔列表 (存储笔索引 k，笔 k = points[k]→points[k+1])
 
-        float v0 = pIn[p0] == 1.0f ? pHigh[p0] : pLow[p0];
-        float v1 = pIn[p1] == 1.0f ? pHigh[p1] : pLow[p1];
-        float v2 = pIn[p2] == 1.0f ? pHigh[p2] : pLow[p2];
-        float v3 = pIn[p3] == 1.0f ? pHigh[p3] : pLow[p3];
+    // 辅助函数：获取笔的高低价
+    auto bi_high_fn = [&](int k) -> float {
+        // 笔 k: points[k] → points[k+1]，high = 顶分型端点的最高价
+        return (pIn[points[k]] == 1.0f) ? pHigh[points[k]] : pHigh[points[k+1]];
+    };
+    auto bi_low_fn = [&](int k) -> float {
+        return (pIn[points[k]] == 1.0f) ? pLow[points[k+1]] : pLow[points[k]];
+    };
+    // has_overlap(l1, h1, l2, h2): h2 > l1 && h1 > l2
+    auto zs_overlap = [](float l1, float h1, float l2, float h2) -> bool {
+        return h2 > l1 && h1 > l2;
+    };
 
-        float zg, zd;
-        if (pIn[p1] == 1.0f) {
-            // p0 是低点
-            zg = (v1 < v3) ? v1 : v3; // 顶的相对低点为中枢高ZG
-            zd = (v0 > v2) ? v0 : v2; // 底的相对高点为中枢低ZD
-        } else {
-            // p0 是高点
-            zg = (v0 < v2) ? v0 : v2; 
-            zd = (v1 > v3) ? v1 : v3; 
+    // 段方向：用于 over_seg 的方向检查
+    std::vector<int> seg_dirs; // +1=上升段, -1=下降段
+    for (size_t s = 0; s + 1 < seg_endpoints.size(); ++s) {
+        seg_dirs.push_back(seg[seg_endpoints[s]] == -1.0f ? 1 : -1);
+    }
+    auto get_parent_seg_dir = [&](int kline_idx) -> int {
+        int sidx = get_seg_idx(kline_idx);
+        return (sidx < (int)seg_dirs.size()) ? seg_dirs[sidx] : 0;
+    };
+
+    for (size_t k = 0; k + 1 < points.size(); ++k) {
+        float bh = bi_high_fn((int)k);
+        float bl = bi_low_fn((int)k);
+
+        // Step 1: 尝试延伸已有中枢 (对齐 try_add_to_end)
+        if (!zs_list.empty() && free_bi.empty()) {
+            ZSInfo& last = zs_list.back();
+            // 上一个中枢最后一笔的索引 = end_pt - 1
+            bool adjacent = ((int)k - (last.end_pt - 1)) <= 1;
+
+            if (adjacent) {
+                // 最后一笔没有 next，跳过 (对齐: if bi.next is None: return)
+                if (k + 2 >= points.size()) continue;
+
+                float next_bh = bi_high_fn((int)k + 1);
+                float next_bl = bi_low_fn((int)k + 1);
+
+                // 对齐: in_range(bi.next) and try_add_to_end(bi) [内含 in_range(bi)]
+                if (zs_overlap(last.zd, last.zg, next_bl, next_bh) &&
+                    zs_overlap(last.zd, last.zg, bl, bh)) {
+                    // 延伸中枢：更新 end 和 peak，但 ZD/ZG 不变
+                    last.end_idx = points[k + 1];
+                    last.end_pt = (int)k + 1;
+                    if (bh > last.peak_high) last.peak_high = bh;
+                    if (bl < last.peak_low) last.peak_low = bl;
+                    continue;
+                }
+
+                // Step 2: 笔仍在中枢范围内则跳过 (对齐: in_range(bi) → return)
+                if (zs_overlap(last.zd, last.zg, bl, bh)) {
+                    continue;
+                }
+            }
         }
 
-        // 验证中枢区间重叠
-        if (zd < zg) {
-            zs_flag[p0] = 1.0f;
-            zs_flag[p3] = 2.0f;
-            zs_h[p0] = zg; zs_h[p3] = zg;
-            zs_l[p0] = zd; zs_l[p3] = zd;
-            last_zs_end = i + 4; // 强制下一个中枢跨越连接段（跳过p3点共享，避免端点Flag与高度数组被覆盖）
+        // Step 3: 加入空闲列表，尝试构建新中枢 (对齐: add_to_free_lst + try_construct_zs)
+        // 去重：防止同一笔重复添加
+        if (!free_bi.empty() && free_bi.back() == (int)k) {
+            free_bi.pop_back();
+        }
+        free_bi.push_back((int)k);
 
-            // 粗略买卖点映射：中枢离开段
-            if (pIn[p3] == -1.0f) {
-                bsp[p3] = 1.0f; // 1买
-                if (i + 5 < points.size()) {
-                    int p5 = points[i+5];
-                    if (pLow[p5] > zg) {
-                        bsp[p5] = 3.0f; // 3买
-                    } else if (pLow[p5] > pLow[p3]) {
-                        bsp[p5] = 2.0f; // 2买
-                    }
+        if (free_bi.size() >= 3) {
+            int b0 = free_bi[free_bi.size() - 3];
+            int b1 = free_bi[free_bi.size() - 2];
+            int b2 = free_bi[free_bi.size() - 1];
+
+            // 方向检查 (对齐: lst[0].dir == lst[0].parent_seg.dir → return None)
+            int bi_dir = (pIn[points[b0]] == -1.0f) ? 1 : -1; // 上=1, 下=-1
+            int parent_dir = get_parent_seg_dir(points[b0]);
+            if (parent_dir != 0 && bi_dir == parent_dir) {
+                continue; // 首笔方向与所属段方向相同，不能构成中枢
+            }
+
+            // 3笔重叠检查：min(high) > max(low)
+            float min_h = bi_high_fn(b0);
+            float tmp = bi_high_fn(b1); if (tmp < min_h) min_h = tmp;
+            tmp = bi_high_fn(b2); if (tmp < min_h) min_h = tmp;
+
+            float max_l = bi_low_fn(b0);
+            tmp = bi_low_fn(b1); if (tmp > max_l) max_l = tmp;
+            tmp = bi_low_fn(b2); if (tmp > max_l) max_l = tmp;
+
+            if (min_h > max_l && b0 > 0) { // begin_bi.idx > 0
+                ZSInfo zs;
+                zs.start_idx = points[b0];
+                zs.end_idx = points[b2 + 1];
+                zs.start_pt = b0;
+                zs.end_pt = b2 + 1;
+                zs.zg = min_h;
+                zs.zd = max_l;
+                zs.peak_high = -999999.0f;
+                zs.peak_low = 999999.0f;
+                for (int j = b0; j <= b2 + 1 && j < (int)points.size(); ++j) {
+                    if (pHigh[points[j]] > zs.peak_high) zs.peak_high = pHigh[points[j]];
+                    if (pLow[points[j]] < zs.peak_low) zs.peak_low = pLow[points[j]];
                 }
-            } else {
-                bsp[p3] = 11.0f; // 1卖
-                if (i + 5 < points.size()) {
-                    int p5 = points[i+5];
-                    if (pHigh[p5] < zd) {
-                        bsp[p5] = 13.0f; // 3卖
-                    } else if (pHigh[p5] < pHigh[p3]) {
-                        bsp[p5] = 12.0f; // 2卖
-                    }
+                zs.seg_idx = get_seg_idx(points[b0]);
+                zs_list.push_back(zs);
+                free_bi.clear();
+            }
+        }
+    }
+
+    // ---- 中枢合并逻辑 (zs_combine) ----
+#if CFG_ZS_COMBINE
+    {
+        bool merged = true;
+        while (merged) {
+            merged = false;
+            for (size_t i = 0; i + 1 < zs_list.size(); ++i) {
+                // 不同线段的中枢不能合并 (对应 Python: begin_bi.seg_idx != zs2.begin_bi.seg_idx)
+                if (zs_list[i].seg_idx != zs_list[i+1].seg_idx) continue;
+
+                bool can_combine = false;
+                // 根据 combine_mode 判断是否可合并
+                #define STR_EQ(a, b) (a[0]==b[0] && a[1]==b[1] && a[2]==b[2] && a[3]==b[3])
+                const char mode[] = CFG_ZS_COMBINE_MODE;
+                if (STR_EQ(mode, "peak")) {
+                    // peak 模式：peak 区间有重叠（严格大于）
+                    can_combine = (zs_list[i].peak_high > zs_list[i+1].peak_low)
+                               && (zs_list[i+1].peak_high > zs_list[i].peak_low);
+                } else {
+                    // zs 模式：中枢区间有重叠（含等于）
+                    can_combine = (zs_list[i].zg >= zs_list[i+1].zd)
+                               && (zs_list[i+1].zg >= zs_list[i].zd);
+                }
+                #undef STR_EQ
+
+                if (can_combine) {
+                    // do_combine: 扩展合并后的范围
+                    zs_list[i].zd = (zs_list[i].zd < zs_list[i+1].zd) ? zs_list[i].zd : zs_list[i+1].zd;
+                    zs_list[i].zg = (zs_list[i].zg > zs_list[i+1].zg) ? zs_list[i].zg : zs_list[i+1].zg;
+                    zs_list[i].peak_low = (zs_list[i].peak_low < zs_list[i+1].peak_low) ? zs_list[i].peak_low : zs_list[i+1].peak_low;
+                    zs_list[i].peak_high = (zs_list[i].peak_high > zs_list[i+1].peak_high) ? zs_list[i].peak_high : zs_list[i+1].peak_high;
+                    zs_list[i].end_idx = zs_list[i+1].end_idx;
+                    zs_list[i].end_pt = zs_list[i+1].end_pt;
+                    zs_list.erase(zs_list.begin() + i + 1);
+                    merged = true;
+                    break; // 重新从头检查
+                }
+            }
+        }
+    }
+#endif
+
+    // ---- 从（合并后的）zs_list 生成输出数组 ----
+    for (size_t z = 0; z < zs_list.size(); ++z) {
+        const ZSInfo& zs = zs_list[z];
+        zs_flag[zs.start_idx] = 1.0f;  // 中枢起始标记
+        zs_flag[zs.end_idx] = 2.0f;    // 中枢结束标记
+        zs_h[zs.start_idx] = zs.zg;
+        zs_h[zs.end_idx] = zs.zg;
+        zs_l[zs.start_idx] = zs.zd;
+        zs_l[zs.end_idx] = zs.zd;
+
+        // 买卖点：中枢离开段
+        int exit_idx = zs.end_idx;
+        if (pIn[exit_idx] == -1.0f) {
+            bsp[exit_idx] = 1.0f; // 1买
+            // 检查中枢后第2笔(同方向)是否有2买/3买
+            if (zs.end_pt + 2 < (int)points.size()) {
+                int p_next = points[zs.end_pt + 2];
+                if (pLow[p_next] > zs.zg) {
+                    bsp[p_next] = 3.0f; // 3买
+                } else if (pLow[p_next] > pLow[exit_idx]) {
+                    bsp[p_next] = 2.0f; // 2买
+                }
+            }
+        } else {
+            bsp[exit_idx] = 11.0f; // 1卖
+            if (zs.end_pt + 2 < (int)points.size()) {
+                int p_next = points[zs.end_pt + 2];
+                if (pHigh[p_next] < zs.zd) {
+                    bsp[p_next] = 13.0f; // 3卖
+                } else if (pHigh[p_next] < pHigh[exit_idx]) {
+                    bsp[p_next] = 12.0f; // 2卖
                 }
             }
         }

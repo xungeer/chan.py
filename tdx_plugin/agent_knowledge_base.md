@@ -29,10 +29,27 @@ c:\Users\luyu4\chan.py\
 ## 3. 核心接口与通信
 这套 C++ 内核主要实现对底层 K 线序列的横向扫描计算（详见底层 `CalculateChanElements` 通用分析函数）。它向上导出 `RegisterTdxFunc` 回调供通达信识别。同时内部遵循以下通达信标准的 8 个挂载接口设计（Func 号数映射）：
 - **Func1**：笔标记扫描与合并过滤算法（确保 `1` 和 `-1` 在 `DRAWLINE` 函数中能连续成对出现）。
-- **Func2 / Func3**：中枢的高点 `ZS_H` 与低点 `ZS_L`（即提取出的 `[ZD, ZG]` 区间）。
-- **Func4**：中枢结构（开局/结尾）定点信号提取 `ZS_FLAG`（通过跳跃迭代距离避免两个本级中枢端点标记被意外覆盖）。
-- **Func5 / Func6**：对应三类买卖点标记提取（如1买为 `1`，1卖为 `11`）以及线段的高低点标记分析。
+- **Func2 / Func3**：中枢的高点 `ZS_H` 与低点 `ZS_L`（即提取出的 `[ZD, ZG]` 区间）。若启用 `CFG_ZS_COMBINE`，输出的是合并后中枢的区间。
+- **Func4**：中枢结构（开局/结尾）定点信号提取 `ZS_FLAG`（通过跳跃迭代距离避免两个本级中枢端点标记被意外覆盖）。合并后中枢的起止标记会被更新。
+- **Func5 / Func6**：对应三类买卖点标记提取（如1买为 `1`，1卖为 `11`）以及线段的高低点标记分析。买卖点基于合并后中枢重新计算。
 - **Func7 / Func8**：跨周期的降维映射还原，配合 `FBASE_CHAN.BI#MIN_xx` 处理次级别的跨级笔呈现。
+
+### 3.1 over_seg 中枢检测算法 (zs_algo)
+`CalculateChanElements` 内部实现了完整的 `over_seg` 中枢算法（对齐 Python `ZSList.update_overseg_zs`），逐笔处理，使用以下核心逻辑：
+- **`try_add_to_end` 延伸**：当已有中枢且空闲列表为空时，检查当前笔及下一笔是否仍在 [ZD, ZG] 范围内（`zs_overlap`）。若是，延伸中枢（更新 `end_idx/end_pt/peak` 值，**ZD/ZG 不变**），使中枢可跨越初始3笔。
+- **in-range 跳过**：当前笔在中枢范围内但无法延伸时，跳过该笔不加入空闲列表。
+- **方向检查**：构建中枢时，首笔方向必须与所属线段方向相反（逆势笔），否则跳过。通过 `seg_dirs[]` 和 `get_parent_seg_dir()` 实现。
+- **3笔重叠构建**：空闲列表积累到3笔后，取最后3笔检查 `min(high) > max(low)`，满足且 `begin_bi.idx > 0` 则形成中枢。
+- 使用 `bi_high_fn(k)` / `bi_low_fn(k)` 辅助函数获取笔 k（`points[k]→points[k+1]`）的价格区间。
+
+### 3.2 中枢合并机制 (zs_combine)
+`struct ZSInfo` 存储每个中枢的完整信息（`start_idx`, `end_idx`, `zg`, `zd`, `peak_high`, `peak_low`, `seg_idx`）。中枢检测完成后，根据编译宏执行合并：
+- **`CFG_ZS_COMBINE = 1`**：启用合并（对应 `main.py` 中 `zs_combine: True`）。
+- **`CFG_ZS_COMBINE_MODE = "peak"`**：按 `peak_high/peak_low` 区间重叠判断是否合并（严格大于）。
+- **`CFG_ZS_COMBINE_MODE = "zs"`**：按 `zg/zd` 中枢区间重叠判断（含等于）。
+- **同段约束**：`seg_idx` 不同的中枢不可合并（对齐 Python `begin_bi.seg_idx != zs2.begin_bi.seg_idx`）。
+- 合并操作：扩展 `zd = min`, `zg = max`, `peak_low = min`, `peak_high = max`，`end` 取后者。反复迭代直至无法继续合并。
+- 合并后从 `vector<ZSInfo>` 重新生成 `zs_h`, `zs_l`, `zs_flag`, `bsp` 四个输出通道。
 
 **重要公式陷阱与经验法则**：
 - **中枢闭合问题**：不能仅仅用一句 `STICKLINE` 绘制，这只会得到两根竖线。必须由两条 `DRAWLINE(ZS_FLAG=1, H, ZS_FLAG=2, H)` 画横向上下表皮，并与 `STICKLINE` 的左右垂直皮结合，才能形成真正长方形全闭包体。
@@ -88,8 +105,9 @@ Agent 首先要执行 `cd tdx_plugin && python build_tdx_dll.py`。
 ## 6. 拓展接力点
 如果希望之后对算法进行演进优化：
 1. 请勿修改原 `chan.py` 内部任何文件。
-2. 直接编辑 `tdx_plugin/chan2026_main.cpp` 中对应的 `Func` 实现体。当前为基础架子，可进一步参照原始 Python 内 `Seg/Bi` 对特征序列复杂的边界化处理来细化 C++ 版骨架的健壮度。
+2. 直接编辑 `tdx_plugin/chan2026_main.cpp` 中对应的 `Func` 实现体。`over_seg` 中枢算法和 `zs_combine` 合并已完成实现，可进一步参照原始 Python 内 `Seg/Bi` 对特征序列复杂的边界化处理来细化 C++ 版骨架的健壮度。
 3. 改完后在 `tdx_plugin` 目录运行 `python build_tdx_dll.py` 触发生成和测试流即可。
+4. 新增配置参数时，只需在 `main.py` 的 `config_dict` 中添加，`build_tdx_dll.py` 会自动生成对应的 `CFG_xxx` 宏到 `tdx_config.h`，然后在 C++ 中通过 `#if CFG_xxx` 或直接引用即可。
 
 ## 7. 核心算法修复与填坑记录 (Troubleshooting & Core Fixes)
 在项目的迭代中，解决了一些通达信特有机制导致的绘图异常问题，后续开发必须充分注意这些“坑点”：
