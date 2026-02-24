@@ -45,6 +45,16 @@ def generate_header(config, output_file):
         else:
             lines.append(f'#define CFG_{k.upper()} "{v}"')
             
+    # Derived boolean macros for compile-time branching
+    if config.get('bi_algo') == 'fx':
+        lines.append('#define CFG_BI_ALGO_FX 1')
+    if config.get('bi_fx_check') == 'loss':
+        lines.append('#define CFG_BI_FX_CHECK_LOSS 1')
+    elif config.get('bi_fx_check') == 'strict':
+        lines.append('#define CFG_BI_FX_CHECK_STRICT 1')
+    elif config.get('bi_fx_check') == 'half':
+        lines.append('#define CFG_BI_FX_CHECK_HALF 1')
+
     lines.extend(["", "#endif"])
     with open(output_file, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))

@@ -48,8 +48,8 @@ void Parse1(int nCount, float *pOut, float *pHigh, float *pLow) {
     }
 }
 
-// 化简函数 (至少5根K线完成一笔)
-void Parse2(int nCount, float *pOut, float *pHigh, float *pLow) {
+// 化简函数 (跨度阈值由参数控制, bi_strict=True时为4, False时为3)
+void Parse2(int nCount, float *pOut, float *pHigh, float *pLow, int threshold = 4) {
     int nCurrTop = 0, nPrevTop = 0;
     int nCurrBot = 0, nPrevBot = 0;
 
@@ -60,8 +60,8 @@ void Parse2(int nCount, float *pOut, float *pHigh, float *pLow) {
 
             if (nPrevTop > 0 && nCurrBot > 0 && nPrevBot > 0) {
                 if ((pHigh[nCurrTop] >= pHigh[nPrevTop]) && (pLow[nCurrBot] > pLow[nPrevBot])) {
-                    if (((nCurrTop - nCurrBot < 4) && (nCount - nCurrTop > 4)) ||
-                        (nCurrBot - nPrevTop < 4) || (nPrevTop - nPrevBot < 4)) {
+                    if (((nCurrTop - nCurrBot < threshold) && (nCount - nCurrTop > threshold)) ||
+                        (nCurrBot - nPrevTop < threshold) || (nPrevTop - nPrevBot < threshold)) {
                         pOut[nCurrBot] = 0.0f;
                         pOut[nPrevTop] = 0.0f;
                     }
@@ -74,8 +74,8 @@ void Parse2(int nCount, float *pOut, float *pHigh, float *pLow) {
 
             if (nCurrBot > 0 && nCurrTop > 0 && nPrevTop > 0 && nPrevBot > 0) {
                 if ((pLow[nCurrBot] <= pLow[nPrevBot]) && (pHigh[nCurrTop] < pHigh[nPrevTop])) {
-                    if (((nCurrBot - nCurrTop < 4) && (nCount - nCurrBot > 4)) ||
-                        (nCurrTop - nPrevBot < 4) || (nPrevBot - nPrevTop < 4)) {
+                    if (((nCurrBot - nCurrTop < threshold) && (nCount - nCurrBot > threshold)) ||
+                        (nCurrTop - nPrevBot < threshold) || (nPrevBot - nPrevTop < threshold)) {
                         pOut[nCurrTop] = 0.0f;
                         pOut[nPrevBot] = 0.0f;
                     }
@@ -85,15 +85,92 @@ void Parse2(int nCount, float *pOut, float *pHigh, float *pLow) {
     }
 }
 
+// bi_fx_check 分型有效性后处理
+// 对齐 Python KLine.check_fx_valid 的 LOSS / STRICT 模式
+void BiValidateFx(int nCount, float *pOut, float *pHigh, float *pLow) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        // 收集当前所有标记点
+        std::vector<int> pts;
+        for (int i = 0; i < nCount; ++i)
+            if (pOut[i] != 0.0f) pts.push_back(i);
+        if (pts.size() < 2) return;
+
+        for (size_t i = 0; i + 1 < pts.size(); ++i) {
+            int a = pts[i], b = pts[i+1];
+            bool valid = true;
+
+#ifdef CFG_BI_FX_CHECK_LOSS
+            // LOSS 模式：仅检查分型自身的高低
+            if (pOut[a] == 1.0f && pOut[b] == -1.0f) {
+                // 顶→底: top.high > bottom.high AND bottom.low < top.low
+                valid = (pHigh[a] > pHigh[b]) && (pLow[b] < pLow[a]);
+            } else if (pOut[a] == -1.0f && pOut[b] == 1.0f) {
+                // 底→顶: bottom.low < top.low AND top.high > bottom.high
+                valid = (pLow[a] < pLow[b]) && (pHigh[b] > pHigh[a]);
+            }
+#elif defined(CFG_BI_FX_CHECK_STRICT)
+            // STRICT 模式：检查分型前后相邻K线
+            if (pOut[a] == 1.0f && pOut[b] == -1.0f) {
+                float a_low = pLow[a];
+                if (a > 0) a_low = (pLow[a-1] < a_low) ? pLow[a-1] : a_low;
+                if (a + 1 < nCount) a_low = (pLow[a+1] < a_low) ? pLow[a+1] : a_low;
+                float b_high = pHigh[b];
+                if (b > 0) b_high = (pHigh[b-1] > b_high) ? pHigh[b-1] : b_high;
+                if (b + 1 < nCount) b_high = (pHigh[b+1] > b_high) ? pHigh[b+1] : b_high;
+                valid = (pHigh[a] > b_high) && (pLow[b] < a_low);
+            } else if (pOut[a] == -1.0f && pOut[b] == 1.0f) {
+                float a_high = pHigh[a];
+                if (a > 0) a_high = (pHigh[a-1] > a_high) ? pHigh[a-1] : a_high;
+                if (a + 1 < nCount) a_high = (pHigh[a+1] > a_high) ? pHigh[a+1] : a_high;
+                float b_low = pLow[b];
+                if (b > 0) b_low = (pLow[b-1] < b_low) ? pLow[b-1] : b_low;
+                if (b + 1 < nCount) b_low = (pLow[b+1] < b_low) ? pLow[b+1] : b_low;
+                valid = (pLow[a] < b_low) && (pHigh[b] > a_high);
+            }
+#elif defined(CFG_BI_FX_CHECK_HALF)
+            // HALF 模式：检查分型前一根邻居
+            if (pOut[a] == 1.0f && pOut[b] == -1.0f) {
+                float a_low = pLow[a];
+                if (a + 1 < nCount) a_low = (pLow[a+1] < a_low) ? pLow[a+1] : a_low;
+                float b_high = pHigh[b];
+                if (b > 0) b_high = (pHigh[b-1] > b_high) ? pHigh[b-1] : b_high;
+                valid = (pHigh[a] > b_high) && (pLow[b] < a_low);
+            } else if (pOut[a] == -1.0f && pOut[b] == 1.0f) {
+                float a_high = pHigh[a];
+                if (a + 1 < nCount) a_high = (pHigh[a+1] > a_high) ? pHigh[a+1] : a_high;
+                float b_low = pLow[b];
+                if (b > 0) b_low = (pLow[b-1] < b_low) ? pLow[b-1] : b_low;
+                valid = (pLow[a] < b_low) && (pHigh[b] > a_high);
+            }
+#endif
+            if (!valid) {
+                // 移除无效的后端点
+                pOut[b] = 0.0f;
+                changed = true;
+                break;
+            }
+        }
+    }
+}
+
 // Func1: 笔标记
 void Func1(int nCount, float *pOut, float *pHigh, float *pLow, float *pExt) {
     Parse1(nCount, pOut, pHigh, pLow);
-    
-    // Check CFG_BI_STRICT or other bi configs implicitly (example)
-    int times = 1; // Default parsing times
-    for(int k = 0; k < times; k++) {
-        Parse2(nCount, pOut, pHigh, pLow);
-    }
+
+#ifndef CFG_BI_ALGO_FX
+    // bi_algo="normal": 执行跨度化简
+    #if CFG_BI_STRICT
+        Parse2(nCount, pOut, pHigh, pLow, 4);  // 严格模式 span >= 4
+    #else
+        Parse2(nCount, pOut, pHigh, pLow, 3);  // 非严格模式 span >= 3
+    #endif
+#endif
+
+#if defined(CFG_BI_FX_CHECK_LOSS) || defined(CFG_BI_FX_CHECK_STRICT) || defined(CFG_BI_FX_CHECK_HALF)
+    BiValidateFx(nCount, pOut, pHigh, pLow);
+#endif
 }
 
 // 中枢信息结构体

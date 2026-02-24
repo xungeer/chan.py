@@ -28,7 +28,10 @@ c:\Users\luyu4\chan.py\
 
 ## 3. 核心接口与通信
 这套 C++ 内核主要实现对底层 K 线序列的横向扫描计算（详见底层 `CalculateChanElements` 通用分析函数）。它向上导出 `RegisterTdxFunc` 回调供通达信识别。同时内部遵循以下通达信标准的 8 个挂载接口设计（Func 号数映射）：
-- **Func1**：笔标记扫描与合并过滤算法（确保 `1` 和 `-1` 在 `DRAWLINE` 函数中能连续成对出现）。
+- **Func1**：笔标记扫描与合并过滤算法（确保 `1` 和 `-1` 在 `DRAWLINE` 函数中能连续成对出现）。支持以下编译期配置：
+  - `CFG_BI_ALGO_FX`：当 `bi_algo="fx"` 时定义，**跳过 Parse2 跨度化简**（不检查笔跨度），与 Python `can_make_bi` 中 `satisfy_span = True` 对齐。
+  - `CFG_BI_STRICT`：当 `bi_algo="normal"` 时，控制 Parse2 的跨度阈值（`1` -> span>=4 严格模式，`0` -> span>=3 宽松模式）。
+  - `CFG_BI_FX_CHECK_LOSS` / `CFG_BI_FX_CHECK_STRICT` / `CFG_BI_FX_CHECK_HALF`：分型有效性检查模式，通过 `BiValidateFx` 后处理函数实现，对齐 Python `KLine.check_fx_valid`。
 - **Func2 / Func3**：中枢的高点 `ZS_H` 与低点 `ZS_L`（即提取出的 `[ZD, ZG]` 区间）。若启用 `CFG_ZS_COMBINE`，输出的是合并后中枢的区间。
 - **Func4**：中枢结构（开局/结尾）定点信号提取 `ZS_FLAG`（通过跳跃迭代距离避免两个本级中枢端点标记被意外覆盖）。合并后中枢的起止标记会被更新。
 - **Func5 / Func6**：对应三类买卖点标记提取（如1买为 `1`，1卖为 `11`）以及线段的高低点标记分析。买卖点基于合并后中枢重新计算。
@@ -89,6 +92,7 @@ c:\Users\luyu4\chan.py\
 ### 第一步：参数注入（Python 到 C++ 的降维映射）
 Agent 首先要执行 `cd tdx_plugin && python build_tdx_dll.py`。
 脚本机制：它会退回上一级读取 `../main.py` 的源码 `config_dict`，利用正则清洗提纯配置字典中的所有配置项，并在 `tdx_plugin` 文件夹生成对应的 C++ 头文件（`tdx_config.h`），以宏的形式（`#define CFG_xx`）发送设置，保证两端的“单一事实来源（Single Source of Truth）”。
+此外，脚本还会根据配置值自动生成**派生布尔宏**（如 `CFG_BI_ALGO_FX`、`CFG_BI_FX_CHECK_LOSS`），方便 C++ 中使用 `#ifdef` 进行编译期分支选择，避免运行时字符串比较。
 
 ### 第二步：识别构建环境（强制要求32位 MSVC x86 编译）
 **通达信架构限制：必须加载经典的 32位（x86）DLL。**
@@ -107,7 +111,7 @@ Agent 首先要执行 `cd tdx_plugin && python build_tdx_dll.py`。
 1. 请勿修改原 `chan.py` 内部任何文件。
 2. 直接编辑 `tdx_plugin/chan2026_main.cpp` 中对应的 `Func` 实现体。`over_seg` 中枢算法和 `zs_combine` 合并已完成实现，可进一步参照原始 Python 内 `Seg/Bi` 对特征序列复杂的边界化处理来细化 C++ 版骨架的健壮度。
 3. 改完后在 `tdx_plugin` 目录运行 `python build_tdx_dll.py` 触发生成和测试流即可。
-4. 新增配置参数时，只需在 `main.py` 的 `config_dict` 中添加，`build_tdx_dll.py` 会自动生成对应的 `CFG_xxx` 宏到 `tdx_config.h`，然后在 C++ 中通过 `#if CFG_xxx` 或直接引用即可。
+4. 新增配置参数时，只需在 `main.py` 的 `config_dict` 中添加，`build_tdx_dll.py` 会自动生成对应的 `CFG_xxx` 宏到 `tdx_config.h`，然后在 C++ 中通过 `#if CFG_xxx` 或 `#ifdef CFG_xxx` 引用即可。对于需要编译期分支的字符串类参数（如 `bi_algo`、`bi_fx_check`），应在 `build_tdx_dll.py` 的 `generate_header` 中追加派生布尔宏（如 `CFG_BI_ALGO_FX`），避免在 C++ 中做运行时字符串比较。
 
 ## 7. 核心算法修复与填坑记录 (Troubleshooting & Core Fixes)
 在项目的迭代中，解决了一些通达信特有机制导致的绘图异常问题，后续开发必须充分注意这些“坑点”：
@@ -126,3 +130,12 @@ Agent 首先要执行 `cd tdx_plugin && python build_tdx_dll.py`。
 - **解决规范**：在 `CalculateChanElements` (C++) 的段划分逻辑中，逐个梳理有效的笔极值点（`1.0f` 或 `-1.0f`）：
   - 如果与当前线段方向**相反**：校验相对距离 `k - last_seg_k >= 3`（必须要求反向间隔含3笔以上），方可允许新线段诞生，记录新极值。
   - 如果与当前线段方向**相同**：这代表原线段在延续拓展。此时比较极值强度（例如针对向上的段落：判断 `pHigh[idx] > pHigh[last_seg_k]`）。若创新高，必须主动**擦除旧有的顶点标记，将段端点挪移更新至当前的真极值点处**。
+
+### 7.3 笔配置参数 (bi_algo/bi_strict/bi_fx_check) 未生效问题
+- **现象**：`tdx_config.h` 中正确生成了 `CFG_BI_ALGO "fx"`、`CFG_BI_STRICT 1`、`CFG_BI_FX_CHECK "loss"` 等宏，但 DLL 的笔行为与 Python 不一致。
+- **根本原因**：C++ 字符串宏无法直接用于 `#if` 编译期分支。早期代码仅定义了原始值宏，未生成可用于 `#ifdef` 的布尔派生宏，导致算法代码无法读取配置。
+- **解决规范**：
+  1. 在 `build_tdx_dll.py` 的 `generate_header` 中，根据配置值追加派生布尔宏（如 `bi_algo=="fx"` -> `#define CFG_BI_ALGO_FX 1`）。
+  2. C++ 中使用 `#ifdef CFG_BI_ALGO_FX` / `#ifndef CFG_BI_ALGO_FX` 进行分支。
+  3. `Func1` 调用链：`Parse1` -> (非fx模式) `Parse2(threshold)` -> `BiValidateFx`。
+  4. `BiValidateFx` 根据 `CFG_BI_FX_CHECK_LOSS` / `STRICT` / `HALF` 执行对应的分型有效性后处理，逐对验证相邻顶底端点，移除不满足条件的无效端点。

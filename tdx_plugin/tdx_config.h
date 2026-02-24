@@ -18,5 +18,7 @@
 #define CFG_BS_TYPE 1
 #define CFG_PRINT_WARNING 1
 #define CFG_ZS_ALGO "over_seg"
+#define CFG_BI_ALGO_FX 1
+#define CFG_BI_FX_CHECK_LOSS 1
 
 #endif
