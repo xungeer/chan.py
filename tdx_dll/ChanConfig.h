@@ -80,11 +80,24 @@
 #define ONE_BI_ZS  false
 
 // zs_algo: 中枢构建算法
-//   0 = "normal"   - 普通算法: 标准中枢定义
+//   0 = "normal"   - 普通算法: 标准中枢定义（按线段分段计算）
 //   1 = "over_seg" - 跨线段算法: 中枢可以跨越线段边界
+//   2 = "auto"     - 自动算法: 已确认线段用normal, 未确认线段用over_seg
 //
-// 示例: main.py 中 "zs_algo": "over_seg" 对应 ZS_ALGO = 1
-#define ZS_ALGO  1
+// 示例: main.py 中 "zs_algo": "auto" 对应 ZS_ALGO = 2
+#define ZS_ALGO  2
+
+//=============================================================================
+// 2.5、线段(Seg)相关配置
+// 对应 Python: CSegConfig (Seg/SegConfig.py)
+//=============================================================================
+
+// left_seg_method: 线段残留部分处理方法
+//   0 = "peak" - 峰值法: 在剩余笔中寻找峰值作为虚线段端点（默认）
+//   1 = "all"  - 全包法: 将剩余笔全部归入一个线段
+//
+// 示例: main.py 中 "left_method": "peak" 对应 LEFT_SEG_METHOD = 0
+#define LEFT_SEG_METHOD  0
 
 //=============================================================================
 // 三、买卖点(BSP)相关配置
@@ -136,7 +149,7 @@
 //   4 = "slope"     - 斜率模式
 //   5 = "amp"       - 振幅模式
 //
-// 注意: DLL当前未实现MACD计算，此参数为预留
+// 注意: 在 CMACD.h 的 cal_metric() 中通过编译期分支选择算法
 //
 // 示例: main.py 中 "macd_algo": "peak" 对应 MACD_ALGO = 0
 #define CFG_MACD_ALGO  0
@@ -146,8 +159,8 @@
 //   BS_TYPE_2  = 二类买卖点 (回踩不破前低/反弹不破前高)
 //   BS_TYPE_3A = 三类买卖点a (中枢在一类后面)
 //   BS_TYPE_1P = 一类买卖点p (盘整背驰)
-//   BS_TYPE_2S = 二类卖点s
-//   BS_TYPE_3B = 三类卖点b (中枢在一类前面)
+//   BS_TYPE_2S = 类二买卖点 (T2S)
+//   BS_TYPE_3B = 三类b买卖点 (中枢在一类前面)
 //
 // 示例: main.py 中 "bs_type": "1,2,3a,1p,2s,3b" 对应全部设为 true
 #define BS_TYPE_1   true
@@ -166,6 +179,20 @@
 //   0.9999 = 回踩不能超过前低/前高的99.99%
 //   取值范围: 0.0 ~ 1.0
 #define MAX_BS2_RATE  0.9999f
+
+// bsp2s_follow_2: 类二买卖点是否必须跟随二类买卖点
+//   true  = 必须在二类买卖点成立后才能出现类二买卖点
+//   false = 即使二类不成立也继续检查类二
+//
+// 示例: main.py 中 "bsp2s_follow_2": False 对应 BSP2S_FOLLOW_2 = false
+#define BSP2S_FOLLOW_2  false
+
+// max_bsp2s_lv: 类二买卖点最大层级
+//   0 = 不限制层级
+//   n = 最多检查 n 层类二买卖点
+//
+// 示例: main.py 中 "max_bsp2s_lv": None 对应 MAX_BSP2S_LV = 0
+#define MAX_BSP2S_LV  0
 
 // strict_bsp3: 是否严格三类买卖点判断
 //   true  = 严格模式

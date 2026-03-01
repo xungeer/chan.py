@@ -14,5 +14,9 @@
 #include "KLineCombiner.h"
 #include "BiDetector.h"
 #include "CCentroid.h"
+#include "CMACD.h"
+#include "SegDetector.h"
+#include "CZSList.h"
+#include "CBSPointList.h"
 
 #endif

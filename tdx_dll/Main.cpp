@@ -7,7 +7,7 @@
  *   Func2: 中枢高点数据
  *   Func3: 中枢低点数据
  *   Func4: 中枢起止信号
- *   Func5: 三类买卖点信号 (2=二买, 3=三买, 12=二卖, 13=三卖)
+ *   Func5: 精确三类买卖点信号 (T1/T1P/T2/T2S/T3A/T3B)
  *   Func6: 形态买卖点信号
  *   Func7: 笔强度分析
  *   Func8: 笔斜率分析
@@ -20,9 +20,13 @@
 // 移植自 chan.py: KLine_Combiner.py + BiList.py
 //=============================================================================
 
-// 全局合并器和笔检测器（每次 Func1 调用时重新计算）
+// 全局合并器、笔检测器、MACD计算器和线段检测器（每次 Func1 调用时重新计算）
 static CKLineCombiner g_combiner;
 static CBiDetector    g_detector;
+static CMACD          g_macd;
+static CSegDetector   g_segDetector;
+static CZSList        g_zslist;
+static CBSPointList   g_bsplist;
 
 // Func1 计算笔标记，结果存入 pOut 数组
 // pOut[i] = +1 表示第i根K线是笔的顶点
@@ -34,8 +38,9 @@ static CBiDetector    g_detector;
 //   pOut:   输出数组
 //   pHigh:  最高价数组
 //   pLow:   最低价数组
-//   pTime:  第一个元素代表化简遍数（保持与原版接口兼容）
-void Func1(int nCount, float *pOut, float *pHigh, float *pLow, float *pTime)
+//   pClose: 收盘价数组（用于 MACD 计算）
+//   通达信公式: "chan2026.dll"(1, HIGH, LOW, CLOSE)
+void Func1(int nCount, float *pOut, float *pHigh, float *pLow, float *pClose)
 {
   // 初始化输出
   for (int i = 0; i < nCount; i++)
@@ -49,9 +54,26 @@ void Func1(int nCount, float *pOut, float *pHigh, float *pLow, float *pTime)
   g_combiner.process(nCount, pHigh, pLow);
 
   // 步骤2: 笔识别（参照 BiList.py）
-  g_detector.detect(g_combiner.klcList);
+  g_detector.detect(g_combiner, pHigh, pLow, nCount);
 
-  // 步骤3: 将笔端点标记映射回原始K线序列
+  // 步骤3: MACD 计算（参照 Math/MACD.py）
+  g_macd.clear();
+  if (pClose != NULL) {
+    for (int i = 0; i < nCount; i++) {
+      g_macd.add(pClose[i]);
+    }
+  }
+
+  // 步骤4: 线段识别（参照 Seg/SegListChan.py）
+  g_segDetector.detect(g_detector.biPoints, g_combiner);
+
+  // 步骤5: 线段内中枢计算（参照 ZS/ZSList.py）
+  g_zslist.cal_bi_zs(g_detector.biPoints, g_segDetector.segPoints, g_combiner);
+
+  // 步骤6: 精确买卖点计算（参照 BuySellPoint/BSPointList.py）
+  g_bsplist.cal(g_detector.biPoints, g_segDetector.segPoints, g_combiner, g_macd, g_zslist);
+
+  // 步骤7: 将笔端点标记映射回原始K线序列
   for (int i = 0; i < (int)g_detector.biPoints.size(); i++)
   {
     const BiPoint& bp = g_detector.biPoints[i];
@@ -187,57 +209,36 @@ void Func4(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
 }
 
 //=============================================================================
-// 输出函数5号：三类买卖点信号
+// 输出函数5号：精确三类买卖点信号（每类含2种子类型，共T1/T1P/T2/T2S/T3A/T3B）
 // 移植自 chan.py: BuySellPoint/BSPointList.py
 //
+// 内部数据流: 笔→线段→中枢→MACD→买卖点（在 Func1 中已完成计算）
+//
 // 输出编码：
-//   2  = 二类买点（回踩不破前低 -> fBot1 > fBot2）
-//   3  = 三类买点（中枢终结后回踩 -> PushLow返回true）
-//   12 = 二类卖点（反弹不破前高 -> fTop1 < fTop2）
-//   13 = 三类卖点（中枢终结后反弹 -> PushHigh返回true）
+//   1    = 一类买点 (趋势背驰)
+//   1.5  = 一类P买点 (盘整背驰)
+//   2    = 二类买点
+//   2.5  = 类二买点
+//   3    = 三类a买点 (中枢在一类后)
+//   3.5  = 三类b买点 (中枢在一类前)
+//   11   = 一类卖点
+//   11.5 = 一类P卖点
+//   12   = 二类卖点
+//   12.5 = 类二卖点
+//   13   = 三类a卖点
+//   13.5 = 三类b卖点
+//
+// 需要先调用 Func1 计算笔（Func1 内部同时计算线段+中枢+买卖点），
+// 通达信公式: BSP:="chan2026.dll"(5, BISIGNAL, HIGH, LOW);
 //=============================================================================
 
 void Func5(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
 {
-  CCentroid Centroid;
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
 
-  for (int i = 0; i < nCount; i++)
-  {
-    if (pIn[i] == 1)
-    {
-      if (Centroid.PushHigh(i, pHigh[i]))
-      {
-        // 三类卖点：中枢向上突破后回落形成新中枢终结
-        pOut[i] = 13;
-      }
-      else if (Centroid.fTop1 < Centroid.fTop2)
-      {
-        // 二类卖点：反弹高点低于前一个高点
-        pOut[i] = 12;
-      }
-      else
-      {
-        pOut[i] = 0;
-      }
-    }
-    else if (pIn[i] == -1)
-    {
-      if (Centroid.PushLow(i, pLow[i]))
-      {
-        // 三类买点：中枢向下突破后反弹形成新中枢终结
-        pOut[i] = 3;
-      }
-      else if (Centroid.fBot1 > Centroid.fBot2)
-      {
-        // 二类买点：回踩低点高于前一个低点
-        pOut[i] = 2;
-      }
-      else
-      {
-        pOut[i] = 0;
-      }
-    }
-  }
+  g_bsplist.fillOutput(nCount, pOut);
 }
 
 //=============================================================================
@@ -398,6 +399,92 @@ void Func8(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
 }
 
 //=============================================================================
+// 输出函数10号：MACD 调试输出
+// 输出每根K线的 MACD 柱状图值（用于验证 MACD 计算正确性）
+//
+// 需要先调用 Func1 计算笔（Func1 内部同时计算 MACD），
+// 然后用同样的数据调用 Func10 获取 MACD 值
+//
+// 输入参数:
+//   pIn:  Func1 的笔标记输出（此函数不使用，仅为调用链传递）
+//   pfINb: 未使用
+//   pfINc: 控制输出内容: 0=MACD柱状图, 1=DIF, 2=DEA
+//=============================================================================
+
+void Func10(int nCount, float *pOut, float *pIn, float *pfINb, float *pfINc)
+{
+  (void)pIn;
+  (void)pfINb;
+
+  int mode = 0; // 默认输出 MACD
+  if (pfINc != NULL && nCount > 0) {
+    mode = (int)pfINc[0];
+  }
+
+  for (int i = 0; i < nCount; i++) {
+    if (i < g_macd.size()) {
+      switch (mode) {
+        case 1:  pOut[i] = g_macd[i].DIF; break;
+        case 2:  pOut[i] = g_macd[i].DEA; break;
+        default: pOut[i] = g_macd[i].macd; break;
+      }
+    } else {
+      pOut[i] = 0;
+    }
+  }
+}
+
+//=============================================================================
+// 输出函数9号：线段标记信号
+// 移植自 chan.py: Seg/SegListChan.py
+//
+// 输出编码：
+//   +2 = 向上线段终点
+//   -2 = 向下线段终点
+//
+// 需要先调用 Func1 计算笔（Func1 内部同时计算线段），
+// 通达信公式: SEG:="chan2026.dll"(9, BISIGNAL, HIGH, LOW);
+//=============================================================================
+
+void Func9(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
+{
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
+
+  for (int i = 0; i < nCount; i++) {
+    pOut[i] = 0;
+  }
+
+  for (int i = 0; i < (int)g_segDetector.segPoints.size(); i++) {
+    const SegPoint& sp = g_segDetector.segPoints[i];
+    if (sp.origIdx >= 0 && sp.origIdx < nCount) {
+      pOut[sp.origIdx] = (sp.dir == 1) ? 2.0f : -2.0f;
+    }
+  }
+}
+
+//=============================================================================
+// 输出函数11号：买卖点调试输出（完整列表）
+// 输出所有BSP条目（含同笔多类型），格式:
+//   pOut[0] = 总条目数 N
+//   pOut[1+2*i] = 原始K线索引
+//   pOut[2+2*i] = 编码值
+//
+// 需要先调用 Func1 计算笔（Func1 内部同时计算买卖点），
+// 通达信公式: DEBUG_BSP:="chan2026.dll"(11, BISIGNAL, HIGH, LOW);
+//=============================================================================
+
+void Func11(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
+{
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
+
+  g_bsplist.fillOutputAll(nCount, pOut);
+}
+
+//=============================================================================
 // DLL 函数注册表
 //=============================================================================
 
@@ -411,6 +498,9 @@ static PluginTCalcFuncInfo Info[] =
   {6, &Func6},
   {7, &Func7},
   {8, &Func8},
+  {9, &Func9},
+  {10, &Func10},
+  {11, &Func11},
   {0, NULL},
 };
 

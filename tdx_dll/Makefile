@@ -5,12 +5,12 @@
 
 # Configurations
 INCLUDE=
-CXFLAGS=$(INCLUDE) -O2
+CXFLAGS=$(INCLUDE) -O2 -std=c++11
 LDFLAGS=-static
 
 # Objectives
 OBJECT1=Main.o CCentroid.o
-TARGET1=chan2026.dll
+TARGET1=chan2026-full.dll
 OBJECTS=$(OBJECT1)
 TARGETS=$(TARGET1)
 
@@ -23,9 +23,10 @@ $(TARGET1) : $(OBJECTS)
 
 clean:
 	@echo [RM] $(OBJECTS)
-	@rm -f $(OBJECTS) $(TARGETS)
+	-@del /f /q $(OBJECTS) $(TARGETS) 2>nul || true
 
 # Compile rules
 %.o : %.cpp
 	@echo [CX] $<
 	@g++ $(CXFLAGS) -c -o $@ $<
+

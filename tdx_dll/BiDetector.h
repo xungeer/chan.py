@@ -30,6 +30,11 @@ struct BiPoint {
 class CBiDetector {
 public:
     std::vector<BiPoint> biPoints;
+    const float* pOrigHigh;   // 原始K线的最高价数组（用于峰值查找）
+    const float* pOrigLow;    // 原始K线的最低价数组
+    int nOrigCount;            // 原始K线数量
+
+    CBiDetector() : pOrigHigh(nullptr), pOrigLow(nullptr), nOrigCount(0) {}
 
     void clear() {
         biPoints.clear();
@@ -122,8 +127,12 @@ public:
 
     // 基于合并后K线的分型检测笔
     // 参照 BiList.py 的核心逻辑
-    void detect(const CKLineCombiner& combiner) {
+    void detect(const CKLineCombiner& combiner,
+                const float* origHigh = nullptr, const float* origLow = nullptr, int origCount = 0) {
         clear();
+        pOrigHigh = origHigh;
+        pOrigLow = origLow;
+        nOrigCount = origCount;
 
         const std::vector<CombinedKLine>& klcList = combiner.klcList;
         if (klcList.size() < 3) return;
@@ -239,12 +248,28 @@ public:
 
 private:
     // 获取分型对应的原始K线索引
+    // 对应 Python: end_klc.get_peak_klu(is_high=True/False)
+    // 从合并K线的原始K线中找到实际的峰值K线
+    // Python 从后往前遍历（lst[::-1]），找到 high==klc.high 或 low==klc.low 的K线
     int getOrigIdx(const CombinedKLine& klc, int dir) {
-        if (dir == 1) {
-            return klc.endIdx;
-        } else {
-            return klc.endIdx;
+        if (pOrigHigh != nullptr && pOrigLow != nullptr) {
+            if (dir == 1) {
+                // 顶：找 high 最大的原始K线（从后往前，匹配 Python lst[::-1]）
+                for (int i = klc.endIdx; i >= klc.startIdx; i--) {
+                    if (i >= 0 && i < nOrigCount && pOrigHigh[i] == klc.high) {
+                        return i;
+                    }
+                }
+            } else {
+                // 底：找 low 最小的原始K线（从后往前）
+                for (int i = klc.endIdx; i >= klc.startIdx; i--) {
+                    if (i >= 0 && i < nOrigCount && pOrigLow[i] == klc.low) {
+                        return i;
+                    }
+                }
+            }
         }
+        return klc.endIdx;  // fallback
     }
 };
 

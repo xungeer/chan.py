@@ -1,0 +1,10 @@
+# 编译产物
+*.o
+*.dll
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 调试日志
+*.log
