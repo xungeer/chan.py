@@ -7,9 +7,9 @@
  *   →（Phase 4-6 买卖点判断使用）
  *
  * 与现有 CCentroid 的关系：
- *   - CCentroid 保留用于 Func2/3/4 的流式中枢输出
- *   - CZSList 新增用于买卖点计算的精确中枢列表
- *   - 两者共存，不影响已有功能
+ *   - CCentroid 保留但不再被 Func2/3/4 使用
+ *   - Func2/3/4 已改为使用 CZSList，与买卖点(Func5)使用同一套中枢
+
  *
  * 配置参数来自 ChanConfig.h:
  *   - ZS_COMBINE:      是否进行中枢合并

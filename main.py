@@ -31,7 +31,7 @@ if __name__ == "__main__":
         "macd_algo": "peak",
         "bs_type": '1,2,3a,1p,2s,3b',
         "print_warning": True,
-        "zs_algo": "over_seg",
+        "zs_algo": "auto",
     }
     config = CChanConfig(config_dict)
 

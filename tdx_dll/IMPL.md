@@ -88,6 +88,18 @@
   - ✅ 买卖点：匹配=809，仅Python=1（K[5134] T2），仅DLL=0
   - 差异均在数据末尾（K[5132-5134]），属于尾部未完成笔/线段的边界差异
 
+## Phase 8: 中枢可视化一致化 ✅ (2026-03-01)
+
+- [x] `Main.cpp`：Func2/3/4 数据源从 `CCentroid`（流式笔中枢）切换为 `g_zslist`（CZSList，线段内中枢）
+  - [x] Func2：输出 `zs.high`（中枢上沿）
+  - [x] Func3：输出 `zs.low`（中枢下沿）
+  - [x] Func4：输出中枢起止信号（1/2）
+  - [x] 跳过 `isOneBiZs()` 单笔中枢
+  - [x] K线区间：`biPoints[beginBiIdx].origIdx` ~ `biPoints[endBiIdx+1].origIdx`
+- [x] `CZSList.h`：更新注释，标注 CCentroid 不再被 Func2/3/4 使用
+- [x] `SPEC.md`：更新 Func2/3/4 说明，标注"线段内"和"基于CZSList"
+- [x] 验证：端到端测试通过（买卖点匹配=809，与改动前一致）
+
 ## 编译环境
 
 ```

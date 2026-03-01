@@ -85,126 +85,99 @@ void Func1(int nCount, float *pOut, float *pHigh, float *pLow, float *pClose)
 }
 
 //=============================================================================
-// 输出函数2号：中枢高点数据
-// 移植自 chan.py: ZS/ZSList.py cal_bi_zs
+// 输出函数2号：中枢高点数据（线段内中枢）
+// 数据源：CZSList（与 Func5 买卖点使用同一套中枢）
+// 需要先调用 Func1 计算笔（Func1 内部同时计算中枢），
+// 通达信公式: HIB:="chan2026.dll"(2, BISIGNAL, HIGH, LOW);
 //=============================================================================
 
 void Func2(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
 {
-  CCentroid Centroid;
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
 
-  for (int i = 0; i < nCount; i++)
+  for (int i = 0; i < nCount; i++) pOut[i] = 0;
+
+  const std::vector<BiPoint>& biPts = g_detector.biPoints;
+  for (int zi = 0; zi < (int)g_zslist.zsList.size(); zi++)
   {
-    if (pIn[i] == 1)
-    {
-      // 遇到笔顶点，推入中枢算法
-      if (Centroid.PushHigh(i, pHigh[i]))
-      {
-        // 中枢终结，在区段内填充中枢高边界
-        for (int j = Centroid.nStart; j <= Centroid.nEnd; j++)
-        {
-          pOut[j] = Centroid.fPHigh;
-        }
-      }
-    }
-    else if (pIn[i] == -1)
-    {
-      // 遇到笔底点，推入中枢算法
-      if (Centroid.PushLow(i, pLow[i]))
-      {
-        for (int j = Centroid.nStart; j <= Centroid.nEnd; j++)
-        {
-          pOut[j] = Centroid.fPHigh;
-        }
-      }
-    }
+    const CZS& zs = g_zslist.zsList[zi];
+    if (zs.isOneBiZs()) continue; // 跳过单笔中枢
 
-    // 尾部未完成中枢处理
-    if (Centroid.bValid && (Centroid.nLines >= 2) && (i == nCount - 1))
+    // K线区间：从中枢起始笔到结束笔
+    int kStart = biPts[zs.beginBiIdx].origIdx;
+    int kEnd   = (zs.endBiIdx + 1 < (int)biPts.size())
+               ? biPts[zs.endBiIdx + 1].origIdx
+               : biPts[zs.endBiIdx].origIdx;
+    if (kStart < 0) kStart = 0;
+    if (kEnd >= nCount) kEnd = nCount - 1;
+
+    for (int j = kStart; j <= kEnd; j++)
     {
-      for (int j = Centroid.nStart; j < nCount; j++)
-      {
-        pOut[j] = Centroid.fHigh;
-      }
+      pOut[j] = zs.high;
     }
   }
 }
 
 //=============================================================================
-// 输出函数3号：中枢低点数据
+// 输出函数3号：中枢低点数据（线段内中枢）
+// 数据源：CZSList（与 Func5 买卖点使用同一套中枢）
 //=============================================================================
 
 void Func3(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
 {
-  CCentroid Centroid;
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
 
-  for (int i = 0; i < nCount; i++)
+  for (int i = 0; i < nCount; i++) pOut[i] = 0;
+
+  const std::vector<BiPoint>& biPts = g_detector.biPoints;
+  for (int zi = 0; zi < (int)g_zslist.zsList.size(); zi++)
   {
-    if (pIn[i] == 1)
-    {
-      if (Centroid.PushHigh(i, pHigh[i]))
-      {
-        for (int j = Centroid.nStart; j <= Centroid.nEnd; j++)
-        {
-          pOut[j] = Centroid.fPLow;
-        }
-      }
-    }
-    else if (pIn[i] == -1)
-    {
-      if (Centroid.PushLow(i, pLow[i]))
-      {
-        for (int j = Centroid.nStart; j <= Centroid.nEnd; j++)
-        {
-          pOut[j] = Centroid.fPLow;
-        }
-      }
-    }
+    const CZS& zs = g_zslist.zsList[zi];
+    if (zs.isOneBiZs()) continue;
 
-    // 尾部未完成中枢处理
-    if (Centroid.bValid && (Centroid.nLines >= 2) && (i == nCount - 1))
+    int kStart = biPts[zs.beginBiIdx].origIdx;
+    int kEnd   = (zs.endBiIdx + 1 < (int)biPts.size())
+               ? biPts[zs.endBiIdx + 1].origIdx
+               : biPts[zs.endBiIdx].origIdx;
+    if (kStart < 0) kStart = 0;
+    if (kEnd >= nCount) kEnd = nCount - 1;
+
+    for (int j = kStart; j <= kEnd; j++)
     {
-      for (int j = Centroid.nStart; j < nCount; j++)
-      {
-        pOut[j] = Centroid.fLow;
-      }
+      pOut[j] = zs.low;
     }
   }
 }
 
 //=============================================================================
-// 输出函数4号：中枢起点、终点信号
+// 输出函数4号：中枢起点、终点信号（线段内中枢）
+// 数据源：CZSList（与 Func5 买卖点使用同一套中枢）
 //=============================================================================
 
 void Func4(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
 {
-  CCentroid Centroid;
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
 
-  for (int i = 0; i < nCount; i++)
+  for (int i = 0; i < nCount; i++) pOut[i] = 0;
+
+  const std::vector<BiPoint>& biPts = g_detector.biPoints;
+  for (int zi = 0; zi < (int)g_zslist.zsList.size(); zi++)
   {
-    if (pIn[i] == 1)
-    {
-      if (Centroid.PushHigh(i, pHigh[i]))
-      {
-        pOut[Centroid.nStart] = 1;
-        pOut[Centroid.nEnd]   = 2;
-      }
-    }
-    else if (pIn[i] == -1)
-    {
-      if (Centroid.PushLow(i, pLow[i]))
-      {
-        pOut[Centroid.nStart] = 1;
-        pOut[Centroid.nEnd]   = 2;
-      }
-    }
+    const CZS& zs = g_zslist.zsList[zi];
+    if (zs.isOneBiZs()) continue;
 
-    // 尾部未完成中枢处理
-    if (Centroid.bValid && (Centroid.nLines >= 2) && (i == nCount - 1))
-    {
-      pOut[Centroid.nStart] = 1;
-      pOut[nCount-1]        = 2;
-    }
+    int kStart = biPts[zs.beginBiIdx].origIdx;
+    int kEnd   = (zs.endBiIdx + 1 < (int)biPts.size())
+               ? biPts[zs.endBiIdx + 1].origIdx
+               : biPts[zs.endBiIdx].origIdx;
+    if (kStart >= 0 && kStart < nCount) pOut[kStart] = 1;
+    if (kEnd >= 0 && kEnd < nCount)     pOut[kEnd]   = 2;
   }
 }
 

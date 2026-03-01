@@ -21,9 +21,9 @@ K线数据(H/L/C) → K线合并 → 笔识别 → MACD计算
 | Func | 输入 | 输出 | 状态 |
 |---|---|---|---|
 | Func1 | HIGH, LOW, CLOSE | 笔标记 (+1/-1) | ✅ 已实现 |
-| Func2 | 笔标记, HIGH, LOW | 中枢高边界 | ✅ 已实现 |
-| Func3 | 笔标记, HIGH, LOW | 中枢低边界 | ✅ 已实现 |
-| Func4 | 笔标记, HIGH, LOW | 中枢起止信号 | ✅ 已实现 |
+| Func2 | 笔标记, HIGH, LOW | 中枢高边界（线段内） | ✅ 基于CZSList |
+| Func3 | 笔标记, HIGH, LOW | 中枢低边界（线段内） | ✅ 基于CZSList |
+| Func4 | 笔标记, HIGH, LOW | 中枢起止信号（线段内） | ✅ 基于CZSList |
 | Func5 | 笔标记, HIGH, LOW | 精确买卖点信号 | ✅ T1/T1P/T2/T2S/T3A/T3B |
 | Func6 | 笔标记, HIGH, LOW | 形态买卖点 | ✅ 已实现 |
 | Func7 | 笔标记, HIGH, LOW | 笔强度 | ✅ 已实现 |
@@ -52,7 +52,7 @@ K线数据(H/L/C) → K线合并 → 笔识别 → MACD计算
 | MACD | `CMACD.h` | ~160行 | `Math/MACD.py` + `Bi.cal_macd_metric` | ✅ |
 | 线段识别 | `SegDetector.h` | ~1000行 | `Seg/SegListChan.py` + `EigenFX.py` | ✅ |
 | 线段内中枢 | `CZSList.h` | 607行 | `ZS/ZS.py` + `ZS/ZSList.py` | ✅ |
-| 流式中枢 | `CCentroid.h/cpp` | 340行 | `ZS/ZS.py` + `ZS/ZSList.py` (流式实现, Func2-4用) | ✅ |
+| 流式中枢 | `CCentroid.h/cpp` | 340行 | `ZS/ZS.py` + `ZS/ZSList.py` (流式实现, 已弃用) | ⚠️ 保留但不再使用 |
 | 买卖点 | `CBSPointList.h` | 788行 | `BuySellPoint/BSPointList.py` | ✅ T1/T1P/T2/T2S/T3A/T3B |
 | 配置 | `ChanConfig.h` | ~200行 | `ChanConfig.py` | ✅ |
 | DLL接口 | `FxIndicator.h` | 35行 | — | ✅ |
