@@ -18,5 +18,6 @@
 #include "SegDetector.h"
 #include "CZSList.h"
 #include "CBSPointList.h"
+#include "CSegLevel.h"
 
 #endif

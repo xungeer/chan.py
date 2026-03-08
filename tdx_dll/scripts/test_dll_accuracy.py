@@ -44,6 +44,22 @@ BSP_CODE_MAP = {
     13.5: ('sell', 'T3B'),
 }
 
+# DLL 线段级买卖点编码
+SEG_BSP_CODE_MAP = {
+    21.0: ('buy',  'T1'),
+    21.5: ('buy',  'T1P'),
+    22.0: ('buy',  'T2'),
+    22.5: ('buy',  'T2S'),
+    23.0: ('buy',  'T3A'),
+    23.5: ('buy',  'T3B'),
+    31.0: ('sell', 'T1'),
+    31.5: ('sell', 'T1P'),
+    32.0: ('sell', 'T2'),
+    32.5: ('sell', 'T2S'),
+    33.0: ('sell', 'T3A'),
+    33.5: ('sell', 'T3B'),
+}
+
 PY_BSP_TYPE_MAP = {
     BSP_TYPE.T1:  'T1',
     BSP_TYPE.T1P: 'T1P',
@@ -145,7 +161,15 @@ def calc_python(code="sh.000300"):
         types = [PY_BSP_TYPE_MAP[t] for t in bsp.type]
         py_bsp_list.append((klu_idx, is_buy, types))
 
-    return py_bi_dict, py_seg_points, py_bsp_list, len(list(kl.klu_iter()))
+    # --- 提取线段级买卖点 ---
+    py_seg_bsp_list = []
+    for bsp in kl.seg_bs_point_lst.getSortedBspList():
+        klu_idx = bsp.klu.idx
+        is_buy = bsp.is_buy
+        types = [PY_BSP_TYPE_MAP[t] for t in bsp.type]
+        py_seg_bsp_list.append((klu_idx, is_buy, types))
+
+    return py_bi_dict, py_seg_points, py_bsp_list, py_seg_bsp_list, len(list(kl.klu_iter()))
 
 
 def load_dll(dll_path):
@@ -208,6 +232,11 @@ def calc_dll(high, low, close, dll_path):
     pBspAll = c_arr(*[0.0] * n)
     funcs[11](n, pBspAll, pBi, pHigh, pLow)
 
+    # Func14: 线段级买卖点完整列表（含同笔多类型，格式同Func11）
+    pSegBspAll = c_arr(*[0.0] * n)
+    if 14 in funcs:
+        funcs[14](n, pSegBspAll, pBi, pHigh, pLow)
+
     # 提取非零位置
     dll_bi_dict = {}
     for i in range(n):
@@ -233,7 +262,20 @@ def calc_dll(high, low, close, dll_path):
         else:
             dll_bsp_list.append((orig_idx, None, f"unknown({code})"))
 
-    return dll_bi_dict, dll_seg_points, dll_bsp_list
+    # 从 Func14 输出解析线段级BSP（完整列表，含同位置多类型）
+    dll_seg_bsp_list = []
+    seg_bsp_count = int(pSegBspAll[0])
+    for i in range(seg_bsp_count):
+        orig_idx = int(pSegBspAll[1 + 2*i])
+        code = pSegBspAll[2 + 2*i]
+        if code in SEG_BSP_CODE_MAP:
+            side, typ = SEG_BSP_CODE_MAP[code]
+            is_buy = (side == 'buy')
+            dll_seg_bsp_list.append((orig_idx, is_buy, typ))
+        else:
+            dll_seg_bsp_list.append((orig_idx, None, f"unknown({code})"))
+
+    return dll_bi_dict, dll_seg_points, dll_bsp_list, dll_seg_bsp_list
 
 
 def compare_bi(py_bi, dll_bi):
@@ -317,13 +359,15 @@ def main():
 
     # ---- Python 端计算 ----
     print("\n[1/4] Python CChan 计算...")
-    py_bi, py_seg, py_bsp, py_klu_cnt = calc_python(code)
-    print(f"  Python K线数: {py_klu_cnt}, 笔端点: {len(py_bi)}, 线段端点: {len(py_seg)}, 买卖点: {len(py_bsp)}")
+    py_bi, py_seg, py_bsp, py_seg_bsp, py_klu_cnt = calc_python(code)
+    print(f"  Python K线数: {py_klu_cnt}, 笔端点: {len(py_bi)}, 线段端点: {len(py_seg)}")
+    print(f"  笔级买卖点: {len(py_bsp)}, 线段级买卖点: {len(py_seg_bsp)}")
 
     # ---- DLL 端计算 ----
-    print("\n[2/4] DLL Func1/5/9 计算...")
-    dll_bi, dll_seg, dll_bsp = calc_dll(high, low, close, dll_path)
-    print(f"  DLL 笔端点: {len(dll_bi)}, 线段端点: {len(dll_seg)}, 买卖点: {len(dll_bsp)}")
+    print("\n[2/4] DLL Func1/5/9/12 计算...")
+    dll_bi, dll_seg, dll_bsp, dll_seg_bsp = calc_dll(high, low, close, dll_path)
+    print(f"  DLL 笔端点: {len(dll_bi)}, 线段端点: {len(dll_seg)}")
+    print(f"  笔级买卖点: {len(dll_bsp)}, 线段级买卖点(Func14): {len(dll_seg_bsp)}")
 
     all_pass = True
 
@@ -387,10 +431,57 @@ def main():
                 side = "买" if is_buy else "卖"
                 print(f"      K线[{idx}] {side}点 {t}")
 
+    # ---- 线段级买卖点对比 ----
+    print("\n  ── 线段级买卖点 ──")
+
+    # 展开 Python 的多类型
+    py_seg_bsp_expanded = {}
+    for idx, is_buy, types in py_seg_bsp:
+        for t in types:
+            key = (idx, is_buy, t)
+            py_seg_bsp_expanded[key] = True
+
+    # DLL Func12 解析
+    dll_seg_bsp_expanded = {}
+    for entry in dll_seg_bsp:
+        idx, is_buy, t = entry
+        key = (idx, is_buy, t)
+        dll_seg_bsp_expanded[key] = True
+
+    seg_only_py = sorted(set(py_seg_bsp_expanded.keys()) - set(dll_seg_bsp_expanded.keys()))
+    seg_only_dll = sorted(set(dll_seg_bsp_expanded.keys()) - set(py_seg_bsp_expanded.keys()))
+    seg_matched = sorted(set(py_seg_bsp_expanded.keys()) & set(dll_seg_bsp_expanded.keys()))
+
+    print(f"  Python 线段级买卖点详情:")
+    for idx, is_buy, types in sorted(py_seg_bsp):
+        side = "买" if is_buy else "卖"
+        print(f"    K线[{idx}] {side}点: {','.join(types)}")
+
+    print(f"  DLL 线段级买卖点详情(Func12):")
+    for idx, is_buy, t in sorted(dll_seg_bsp):
+        side = "买" if is_buy else "卖"
+        print(f"    K线[{idx}] {side}点: {t}")
+
+    if not seg_only_py and not seg_only_dll:
+        print(f"\n  ✅ 线段级买卖点 100% 一致 ({len(seg_matched)} 个)")
+    else:
+        all_pass = False
+        print(f"\n  ⚠️  线段级买卖点存在差异: 匹配={len(seg_matched)}, 仅Python={len(seg_only_py)}, 仅DLL={len(seg_only_dll)}")
+        if seg_only_py:
+            print(f"    仅 Python:")
+            for idx, is_buy, t in seg_only_py[:20]:
+                side = "买" if is_buy else "卖"
+                print(f"      K线[{idx}] {side}点 {t}")
+        if seg_only_dll:
+            print(f"    仅 DLL:")
+            for idx, is_buy, t in seg_only_dll[:20]:
+                side = "买" if is_buy else "卖"
+                print(f"      K线[{idx}] {side}点 {t}")
+
     # ---- 总结 ----
     print("\n" + "=" * 60)
     if all_pass:
-        print("✅ 全部通过: 笔/线段/买卖点与 Python 100% 一致")
+        print("✅ 全部通过: 笔/线段/买卖点(笔级+线段级)与 Python 100% 一致")
     else:
         print("⚠️  存在差异，请检查上方详情")
     print("=" * 60)

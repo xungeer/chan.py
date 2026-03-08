@@ -100,6 +100,53 @@
 - [x] `SPEC.md`：更新 Func2/3/4 说明，标注"线段内"和"基于CZSList"
 - [x] 验证：端到端测试通过（买卖点匹配=809，与改动前一致）
 
+## Phase 9: 线段级计算 ✅ (2026-03-02)
+
+> 对应 Python `KLine_List.cal_seg_and_zs()` 第二层：线段→线段的线段→线段级中枢→线段级买卖点
+
+- [x] `CSegLevel.h`（新建，~230行）：线段级计算封装
+  - [x] `buildSegAsBi()`：SegPoint[] → BiPoint[] 适配器（线段端点转换为笔端点格式）
+  - [x] `buildSegCombiner()`：虚拟 CKLineCombiner 构建
+  - [x] `calSlopeMetric()`：slope metric 价格斜率计算
+  - [x] `cal()`：主入口，串联 线段的线段检测 → 线段级中枢 → 线段级买卖点
+  - [x] 复用 `CSegDetector`/`CZSList`/`CBSPointList`，零重复代码
+- [x] `CBSPointList.h`（修改，新增 ~200行）：
+  - [x] `calSeg()`：线段级买卖点入口（macd_algo=slope, bsp1_only_multibi_zs=false）
+  - [x] `seg_cal_seg_bs1point()`/`seg_treat_bsp1()`/`seg_treat_pz_bsp1()`：slope 版一类买卖点
+  - [x] `slopeIsDivergence()`：slope 版背驰判断
+  - [x] `addBSPoint()`：编码偏移 +20（买点 21.x / 卖点 31.x）
+- [x] `Main.cpp`（修改）：
+  - [x] Func1 调用链新增 `g_segLevel.cal()` 步骤
+  - [x] Func5 合并输出笔级+线段级买卖点
+  - [x] 新增 Func12：线段级买卖点独立输出
+  - [x] 新增 Func13：线段的线段标记 (+3/-3)
+  - [x] 新增 Func14：线段级BSP全量调试输出（含同位置多类型）
+  - [x] 函数注册表更新（12/13/14号）
+- [x] `Main.h`：引入 `CSegLevel.h`
+- [x] 编译验证通过
+- [x] **实测验证通过** (`python test_dll_accuracy.py`, 2026-03-02 01:08)
+  - 测试数据：000300 日线，5135 根 K线
+  - ✅ 笔端点：匹配=1838，仅Python=1（K[5134]）
+  - ✅ 线段端点：匹配=258，仅Python=1（K[5132]）
+  - ✅ 笔级买卖点：匹配=809，仅Python=1（K[5134] T2），仅DLL=0
+  - ✅ 线段级买卖点（Func14全量输出）：匹配=108/117 (92.3%)
+    - 仅Python=2：K[97] T1P(DLL输出T1)、K[5132] T2S(尾部)
+    - 仅DLL=7：K[209/223/280/527] 4个(线段的线段多1端点)、K[1235/2767] T1(中枢判断差异)、K[97] T1
+    - 差异根因：CSegDetector 在线段的线段层面的微妙边界判断差异
+
+## Phase 10: 线段级中枢输出 + 绘图开关 ✅ (2026-03-02)
+
+- [x] `Main.cpp`：新增 Func15/16/17（线段级中枢高点/低点/起止信号）
+  - [x] 数据源：`g_segLevel.segZsList` + `g_segLevel.segBiPoints`
+  - [x] 逻辑与 Func2/3/4（笔级中枢）完全一致，仅数据源不同
+  - [x] 函数注册表更新（15/16/17号）
+- [x] `缠论分析.tne`：重写，新增绘图开关系统
+  - [x] 9 个开关参数 P1~P9（笔/线段/线段的线段/笔级中枢/线段级中枢/笔级BSP/线段级BSP/S2/S3B）
+  - [x] 默认仅开启：线段(P2)、线段的线段(P3)、线段级中枢(P5)、S2(P8)、S3B(P9)
+  - [x] 新增线段级中枢绘制（深紫 #6A0DAD）
+- [x] `SPEC.md` / `IMPL.md`：同步更新
+- [x] 编译验证通过
+
 ## 编译环境
 
 ```
@@ -108,4 +155,5 @@ make : C:\Users\luyu4\anaconda3\Library\mingw-w64\bin\mingw32-make.exe
 命令 : mingw32-make -f Makefile (在 tdx_dll 目录)
 DLL  : 64-bit (AMD64)
 ```
+
 

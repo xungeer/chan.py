@@ -56,7 +56,7 @@ public:
     }
 
     // ==================================================================
-    // cal: 核心入口（对应 Python CBSPointList.cal）
+    // cal: 核心入口（对应 Python CBSPointList.cal）— 笔级别
     // ==================================================================
     void cal(const std::vector<BiPoint>& biPoints,
              const std::vector<SegPoint>& segPoints,
@@ -74,6 +74,36 @@ public:
 
         // Phase 6: 三类买卖点
         cal_seg_bs3point(biPoints, segPoints, combiner, zslist);
+    }
+
+    // ==================================================================
+    // calSeg: 线段级别入口（对应 Python seg_bs_point_lst.cal）
+    //
+    // 与 cal() 的关键差异:
+    //   - macd_algo = slope（用价格斜率替代 MACD 面积/峰值）
+    //   - bsp1_only_multibi_zs = false
+    //   - 买点编码基数 = 21，卖点编码基数 = 31
+    // ==================================================================
+    void calSeg(const std::vector<BiPoint>& biPoints,
+                const std::vector<SegPoint>& segPoints,
+                const CKLineCombiner& combiner,
+                const CMACD& macd,
+                const CZSList& zslist) {
+        clear();
+        if (segPoints.empty() || biPoints.size() < 4) return;
+
+        useSegLevel = true;  // 启用线段级模式
+
+        // Phase 4: 一类买卖点（使用 slope metric）
+        seg_cal_seg_bs1point(biPoints, segPoints, combiner, zslist);
+
+        // Phase 5: 二类买卖点
+        cal_seg_bs2point(biPoints, segPoints, combiner);
+
+        // Phase 6: 三类买卖点
+        cal_seg_bs3point(biPoints, segPoints, combiner, zslist);
+
+        useSegLevel = false;
     }
 
     // ==================================================================
@@ -110,6 +140,7 @@ public:
     }
 
 private:
+    bool useSegLevel = false;  // 线段级模式标志（calSeg启用）
 
     // ==================================================================
     // cal_seg_bs1point: 遍历每个线段计算一类买卖点
@@ -747,7 +778,8 @@ private:
     // ==================================================================
     // addBSPoint: 添加买卖点
     // baseCode: 1=T1, 1.5=T1P, 2=T2, 2.5=T2S, 3=T3A, 3.5=T3B
-    // 买点编码 = baseCode, 卖点编码 = baseCode + 10
+    // 笔级别: 买点编码 = baseCode, 卖点编码 = baseCode + 10
+    // 线段级: 买点编码 = baseCode + 20, 卖点编码 = baseCode + 30
     // ==================================================================
     void addBSPoint(int biIdx,
                     const std::vector<BiPoint>& biPoints,
@@ -757,17 +789,16 @@ private:
         if (biIdx < 0 || biIdx >= (int)biPoints.size() - 1) return;
 
         // 判断买/卖: 下降笔 → 买点, 上升笔 → 卖点
-        // biPoints[biIdx].dir: -1=底(笔终点为底) → UP笔 → 卖点
-        //                      +1=顶(笔终点为顶) → DOWN笔 → 买点
-        // Python: is_buy = bi.is_down()
-        // 笔biIdx: biPoints[biIdx] → biPoints[biIdx+1]
         int biDir = (biPoints[biIdx].dir == -1) ? 1 : -1;
         bool is_buy = (biDir == -1); // DOWN笔的终点是底 → 买点
+
+        // 线段级模式时编码偏移 +20
+        float codeOffset = useSegLevel ? 20.0f : 0.0f;
 
         CBSPoint bsp;
         bsp.biIdx = biIdx;
         bsp.is_buy = is_buy;
-        bsp.code = is_buy ? baseCode : (baseCode + 10.0f);
+        bsp.code = is_buy ? (baseCode + codeOffset) : (baseCode + 10.0f + codeOffset);
         bsp.relBsp1BiIdx = relBsp1BiIdx;
 
         // 映射到原始K线索引：笔的终点
@@ -777,10 +808,190 @@ private:
             bsp.origIdx = biPoints[biIdx].origIdx;
         }
 
-        // Python add_bs: 同笔已存在时追加类型(add_another_bsp_prop)
-        // DLL: 直接添加新条目，允许同笔多类型
-        // fillOutput 时取码值最小的，fillOutputAll 输出全部
         bspList.push_back(bsp);
+    }
+
+    // ==================================================================
+    // ===  线段级一类买卖点（使用 slope metric）  ========================
+    // ==================================================================
+
+    // seg_cal_seg_bs1point: 线段级版本的 cal_seg_bs1point
+    // 使用 slope metric 替代 MACD
+    void seg_cal_seg_bs1point(const std::vector<BiPoint>& biPoints,
+                              const std::vector<SegPoint>& segPoints,
+                              const CKLineCombiner& combiner,
+                              const CZSList& zslist) {
+        for (int si = 0; si < (int)segPoints.size(); si++) {
+            seg_cal_single_bs1point(si, biPoints, segPoints, combiner, zslist);
+        }
+    }
+
+    // seg_cal_single_bs1point: 使用 slope metric 判断一类买卖点
+    void seg_cal_single_bs1point(int segIdx,
+                                  const std::vector<BiPoint>& biPoints,
+                                  const std::vector<SegPoint>& segPoints,
+                                  const CKLineCombiner& combiner,
+                                  const CZSList& zslist) {
+        const SegPoint& seg = segPoints[segIdx];
+
+        // 获取线段内中枢列表
+        std::vector<int> zsIndices;
+        zslist.getZsForSeg(segIdx, zsIndices);
+
+        // 线段级: bsp1_only_multibi_zs = false → 直接用全部中枢数
+        int zs_cnt = (int)zsIndices.size();
+        bool is_target_bsp = (MIN_ZS_CNT <= 0 || zs_cnt >= MIN_ZS_CNT);
+
+        // 判断走 treat_bsp1 还是 treat_pz_bsp1
+        bool go_bsp1 = false;
+        if (!zsIndices.empty()) {
+            const CZS& lastZs = zslist.zsList[zsIndices.back()];
+            if (!lastZs.isOneBiZs()) {
+                bool cond_out = (lastZs.biOutIdx >= 0 && lastZs.biOutIdx >= seg.biIdx) ||
+                                (!lastZs.biLst.empty() && lastZs.biLst.back() >= seg.biIdx);
+                int biInIdx = lastZs.biInIdx >= 0 ? lastZs.biInIdx : lastZs.beginBiIdx;
+                bool cond_depth = (seg.biIdx - biInIdx) > 2;
+                go_bsp1 = cond_out && cond_depth;
+            }
+        }
+
+        if (go_bsp1) {
+            seg_treat_bsp1(segIdx, is_target_bsp, biPoints, segPoints, combiner, zslist, zsIndices);
+        } else {
+            seg_treat_pz_bsp1(segIdx, is_target_bsp, biPoints, segPoints, combiner);
+        }
+    }
+
+    // seg_treat_bsp1: 线段级趋势背驰（使用 slope isDivergence）
+    void seg_treat_bsp1(int segIdx, bool is_target_bsp,
+                        const std::vector<BiPoint>& biPoints,
+                        const std::vector<SegPoint>& segPoints,
+                        const CKLineCombiner& combiner,
+                        const CZSList& zslist,
+                        const std::vector<int>& zsIndices) {
+#if !BS_TYPE_1
+        return;
+#endif
+        const SegPoint& seg = segPoints[segIdx];
+        const CZS& lastZs = zslist.zsList[zsIndices.back()];
+
+        float peakRate = 0;
+        bool break_peak = lastZs.outBiIsPeak(biPoints, combiner, seg.biIdx, &peakRate);
+
+#if BS1_PEAK
+        if (!break_peak) {
+            is_target_bsp = false;
+        }
+#endif
+
+        // 使用 slope metric 进行背驰判断
+        bool is_diver = slopeIsDivergence(lastZs, biPoints, seg.biIdx);
+        if (!is_diver) {
+            is_target_bsp = false;
+        }
+
+        if (is_target_bsp) {
+            addBSPoint(seg.biIdx, biPoints, 1.0f, segPoints);
+        }
+        bsp1BiIndices.push_back(seg.biIdx);
+    }
+
+    // seg_treat_pz_bsp1: 线段级盘整背驰（使用 slope metric）
+    void seg_treat_pz_bsp1(int segIdx, bool is_target_bsp,
+                           const std::vector<BiPoint>& biPoints,
+                           const std::vector<SegPoint>& segPoints,
+                           const CKLineCombiner& combiner) {
+#if !BS_TYPE_1P
+        return;
+#endif
+        const SegPoint& seg = segPoints[segIdx];
+        int numBi = (int)biPoints.size() - 1;
+
+        int lastBiIdx = seg.biIdx;
+        int preBiIdx = lastBiIdx - 2;
+        if (preBiIdx < 0 || preBiIdx >= numBi) return;
+        if (preBiIdx < seg.startBiIdx) return;
+
+        int lastBiDir = (biPoints[lastBiIdx].dir == -1) ? 1 : -1;
+        if (lastBiDir != seg.dir) return;
+
+        float lastH, lastL, preH, preL;
+        EigenElement::getBiHighLow(lastBiIdx, biPoints, combiner, lastH, lastL);
+        EigenElement::getBiHighLow(preBiIdx, biPoints, combiner, preH, preL);
+
+        bool isDown = (lastBiDir == -1);
+        if (isDown && lastL > preL) return;
+        if (!isDown && lastH < preH) return;
+
+        // 使用 slope metric 替代 MACD metric
+        float inMetric = calSlopeMetricLocal(preBiIdx, biPoints);
+        float outMetric = calSlopeMetricLocal(lastBiIdx, biPoints);
+
+        bool is_diver;
+        if (DIVERGENCE_RATE > 100.0f) {
+            is_diver = true;
+        } else {
+            is_diver = outMetric <= DIVERGENCE_RATE * inMetric;
+        }
+
+        if (!is_diver) {
+            is_target_bsp = false;
+        }
+
+        if (is_target_bsp) {
+            addBSPoint(lastBiIdx, biPoints, 1.5f, segPoints);
+        }
+        bsp1BiIndices.push_back(lastBiIdx);
+    }
+
+    // ==================================================================
+    // slope metric 辅助方法
+    // ==================================================================
+
+    // calSlopeMetricLocal: 计算笔的 slope metric
+    // 对应 Python CSeg.Cal_MACD_slope()
+    static float calSlopeMetricLocal(int biIdx,
+                                     const std::vector<BiPoint>& biPoints) {
+        if (biIdx < 0 || biIdx + 1 >= (int)biPoints.size()) return 0;
+
+        int biDir = (biPoints[biIdx].dir == -1) ? 1 : -1;
+        int startOrigIdx = biPoints[biIdx].origIdx;
+        int endOrigIdx = biPoints[biIdx + 1].origIdx;
+        float span = (float)(abs(endOrigIdx - startOrigIdx) + 1);
+        if (span < 1) span = 1;
+
+        if (biDir == 1) {
+            float beginLow = biPoints[biIdx].value;
+            float endHigh  = biPoints[biIdx + 1].value;
+            if (endHigh < 1e-10f) return 0;
+            return (endHigh - beginLow) / endHigh / span;
+        } else {
+            float beginHigh = biPoints[biIdx].value;
+            float endLow    = biPoints[biIdx + 1].value;
+            if (beginHigh < 1e-10f) return 0;
+            return (beginHigh - endLow) / beginHigh / span;
+        }
+    }
+
+    // slopeIsDivergence: 使用 slope metric 判断背驰
+    // 对应 Python CZS.is_divergence() 但 metric=slope
+    bool slopeIsDivergence(const CZS& zs,
+                           const std::vector<BiPoint>& biPoints,
+                           int outBiIdx) const {
+        // endBiBreak 检查（复用原有逻辑，不依赖 MACD）
+        if (zs.biOutIdx < 0 && outBiIdx < 0) return false;
+        int checkOutIdx = (outBiIdx >= 0) ? outBiIdx : zs.biOutIdx;
+        if (zs.biInIdx < 0 || checkOutIdx < 0) return false;
+
+        // slope metric
+        float inMetric = calSlopeMetricLocal(zs.biInIdx, biPoints);
+        float outMetric = calSlopeMetricLocal(checkOutIdx, biPoints);
+
+        if (DIVERGENCE_RATE > 100.0f) {
+            return true;
+        } else {
+            return outMetric <= DIVERGENCE_RATE * inMetric;
+        }
     }
 };
 

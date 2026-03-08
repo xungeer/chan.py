@@ -14,6 +14,8 @@ K线数据(H/L/C) → K线合并 → 笔识别 → MACD计算
                               线段内中枢(按seg分段)
                                       ↓
                     一类BSP(背驰) → 二类BSP(回撤) → 三类BSP(中枢突破)
+                                      ↓
+                    线段→线段的线段→线段级中枢→线段级BSP(slope metric)
 ```
 
 ### 导出函数
@@ -31,6 +33,12 @@ K线数据(H/L/C) → K线合并 → 笔识别 → MACD计算
 | Func9 | 笔标记, HIGH, LOW | 线段标记 (+2/-2) | ✅ 已实现 |
 | Func10 | 笔标记, -, mode | MACD/DIF/DEA | ✅ 调试用 |
 | Func11 | 笔标记, HIGH, LOW | BSP完整列表 | ✅ 调试用(含多类型) |
+| Func12 | 笔标记, HIGH, LOW | 线段级买卖点信号 | ✅ Phase 9 |
+| Func13 | 笔标记, HIGH, LOW | 线段的线段标记 (+3/-3) | ✅ Phase 9 |
+| Func14 | 笔标记, HIGH, LOW | 线段级BSP完整列表 | ✅ 调试用(含多类型) |
+| Func15 | 笔标记, HIGH, LOW | 线段级中枢高边界 | ✅ 基于segZsList |
+| Func16 | 笔标记, HIGH, LOW | 线段级中枢低边界 | ✅ 基于segZsList |
+| Func17 | 笔标记, HIGH, LOW | 线段级中枢起止信号 | ✅ 基于segZsList |
 
 ### Func5 买卖点输出编码（目标）
 
@@ -43,6 +51,17 @@ K线数据(H/L/C) → K线合并 → 笔识别 → MACD计算
 | 3 / 13 | 三类a买点 / 三类a卖点 | BSP_TYPE.T3A |
 | 3.5 / 13.5 | 三类b买点 / 三类b卖点 | BSP_TYPE.T3B |
 
+### Func5/Func12 线段级买卖点编码
+
+| 编码 | 含义 | 对应 Python |
+|---|---|---|
+| 21 / 31 | 线段级一类买点 / 卖点 | seg_bs_point_lst T1 |
+| 21.5 / 31.5 | 线段级盘整背驰买点 / 卖点 | seg_bs_point_lst T1P |
+| 22 / 32 | 线段级二类买点 / 卖点 | seg_bs_point_lst T2 |
+| 22.5 / 32.5 | 线段级类二买点 / 卖点 | seg_bs_point_lst T2S |
+| 23 / 33 | 线段级三类a买点 / 卖点 | seg_bs_point_lst T3A |
+| 23.5 / 33.5 | 线段级三类b买点 / 卖点 | seg_bs_point_lst T3B |
+
 ### 内部模块
 
 | 模块 | 文件 | 代码量 | 对应 Python | 状态 |
@@ -53,7 +72,8 @@ K线数据(H/L/C) → K线合并 → 笔识别 → MACD计算
 | 线段识别 | `SegDetector.h` | ~1000行 | `Seg/SegListChan.py` + `EigenFX.py` | ✅ |
 | 线段内中枢 | `CZSList.h` | 607行 | `ZS/ZS.py` + `ZS/ZSList.py` | ✅ |
 | 流式中枢 | `CCentroid.h/cpp` | 340行 | `ZS/ZS.py` + `ZS/ZSList.py` (流式实现, 已弃用) | ⚠️ 保留但不再使用 |
-| 买卖点 | `CBSPointList.h` | 788行 | `BuySellPoint/BSPointList.py` | ✅ T1/T1P/T2/T2S/T3A/T3B |
+| 买卖点 | `CBSPointList.h` | ~1000行 | `BuySellPoint/BSPointList.py` | ✅ T1/T1P/T2/T2S/T3A/T3B + 线段级 |
+| 线段级计算 | `CSegLevel.h` | ~230行 | `KLine_List.cal_seg_and_zs` 第2层 | ✅ SegAsBi适配器 |
 | 配置 | `ChanConfig.h` | ~200行 | `ChanConfig.py` | ✅ |
 | DLL接口 | `FxIndicator.h` | 35行 | — | ✅ |
 
@@ -80,4 +100,12 @@ ZS_H:=TDXDLL3(2, BI, HIGH, LOW);
 ZS_L:=TDXDLL3(3, BI, HIGH, LOW);
 {MACD调试}
 MACD_VAL:=TDXDLL3(10, BI, 0, 0);
+{线段级买卖点}
+SEGBSP:=TDXDLL3(12, BI, HIGH, LOW);
+{线段的线段}
+SEGSEG:=TDXDLL3(13, BI, HIGH, LOW);
+{线段级中枢}
+SZSH:=TDXDLL3(15, BI, HIGH, LOW);
+SZSL:=TDXDLL3(16, BI, HIGH, LOW);
+SZSS:=TDXDLL3(17, BI, HIGH, LOW);
 ```

@@ -11,6 +11,9 @@
  *   Func6: 形态买卖点信号
  *   Func7: 笔强度分析
  *   Func8: 笔斜率分析
+ *   Func15: 线段级中枢高点
+ *   Func16: 线段级中枢低点
+ *   Func17: 线段级中枢起止信号
  *****************************************************************************/
 
 #include "Main.h"
@@ -27,6 +30,7 @@ static CMACD          g_macd;
 static CSegDetector   g_segDetector;
 static CZSList        g_zslist;
 static CBSPointList   g_bsplist;
+static CSegLevel      g_segLevel;
 
 // Func1 计算笔标记，结果存入 pOut 数组
 // pOut[i] = +1 表示第i根K线是笔的顶点
@@ -73,7 +77,10 @@ void Func1(int nCount, float *pOut, float *pHigh, float *pLow, float *pClose)
   // 步骤6: 精确买卖点计算（参照 BuySellPoint/BSPointList.py）
   g_bsplist.cal(g_detector.biPoints, g_segDetector.segPoints, g_combiner, g_macd, g_zslist);
 
-  // 步骤7: 将笔端点标记映射回原始K线序列
+  // 步骤7: 线段级计算（线段的线段 + 线段级中枢 + 线段级买卖点）
+  g_segLevel.cal(g_detector.biPoints, g_segDetector.segPoints, g_combiner, g_macd, nCount);
+
+  // 步骤8: 将笔端点标记映射回原始K线序列
   for (int i = 0; i < (int)g_detector.biPoints.size(); i++)
   {
     const BiPoint& bp = g_detector.biPoints[i];
@@ -211,7 +218,11 @@ void Func5(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
   (void)pHigh;
   (void)pLow;
 
+  // 笔级买卖点
   g_bsplist.fillOutput(nCount, pOut);
+
+  // 线段级买卖点（合并输出，不覆盖已有笔级信号）
+  g_segLevel.fillOutput(nCount, pOut);
 }
 
 //=============================================================================
@@ -458,6 +469,184 @@ void Func11(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
 }
 
 //=============================================================================
+// 输出函数12号：线段级买卖点信号（独立输出）
+// Phase 8: 对应 Python seg_bs_point_lst
+//
+// 输出编码：
+//   21   = 线段级一类买点      31   = 线段级一类卖点
+//   21.5 = 线段级盘整背驰买点  31.5 = 线段级盘整背驰卖点
+//   22   = 线段级二类买点      32   = 线段级二类卖点
+//   22.5 = 线段级类二买点      32.5 = 线段级类二卖点
+//   23   = 线段级三类a买点     33   = 线段级三类a卖点
+//   23.5 = 线段级三类b买点     33.5 = 线段级三类b卖点
+//
+// 通达信公式: SEGBSP:="chan2026.dll"(12, BISIGNAL, HIGH, LOW);
+//=============================================================================
+
+void Func12(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
+{
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
+
+  g_segLevel.fillOutputSeparate(nCount, pOut);
+}
+
+//=============================================================================
+// 输出函数13号：线段的线段标记信号
+// Phase 8: 对应 Python segseg_list
+//
+// 输出编码：
+//   +3 = 向上线段的线段终点
+//   -3 = 向下线段的线段终点
+//
+// 通达信公式: SEGSEG:="chan2026.dll"(13, BISIGNAL, HIGH, LOW);
+//=============================================================================
+
+void Func13(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
+{
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
+
+  for (int i = 0; i < nCount; i++) {
+    pOut[i] = 0;
+  }
+
+  // segSegDetector 的 segPoints 对应线段的线段端点
+  // 但其 origIdx 是在 segBiPoints 坐标系下的
+  // 需要映射回原始K线索引
+  const std::vector<SegPoint>& ssPoints = g_segLevel.segSegDetector.segPoints;
+  const std::vector<BiPoint>& sBiPoints = g_segLevel.segBiPoints;
+
+  for (int i = 0; i < (int)ssPoints.size(); i++) {
+    const SegPoint& sp = ssPoints[i];
+    // 线段的线段终点 = segBiPoints[sp.biIdx+1] 的 origIdx
+    int origIdx = -1;
+    if (sp.biIdx + 1 < (int)sBiPoints.size()) {
+      origIdx = sBiPoints[sp.biIdx + 1].origIdx;
+    } else if (sp.biIdx < (int)sBiPoints.size()) {
+      origIdx = sBiPoints[sp.biIdx].origIdx;
+    }
+    if (origIdx >= 0 && origIdx < nCount) {
+      pOut[origIdx] = (sp.dir == 1) ? 3.0f : -3.0f;
+    }
+  }
+}
+
+//=============================================================================
+// 输出函数14号：线段级买卖点调试输出（完整列表）
+// 格式同Func11: pOut[0]=count, pOut[1+2*i]=origIdx, pOut[2+2*i]=code
+// 通达信公式: DEBUG_SEGBSP:="chan2026.dll"(14, BISIGNAL, HIGH, LOW);
+//=============================================================================
+
+void Func14(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
+{
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
+
+  g_segLevel.segBspList.fillOutputAll(nCount, pOut);
+}
+
+//=============================================================================
+// 输出函数15号：线段级中枢高点数据
+// 数据源：g_segLevel.segZsList（线段级中枢）
+// 通达信公式: SZSH:="chan2026.dll"(15, BISIGNAL, HIGH, LOW);
+//=============================================================================
+
+void Func15(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
+{
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
+
+  for (int i = 0; i < nCount; i++) pOut[i] = 0;
+
+  const std::vector<BiPoint>& biPts = g_segLevel.segBiPoints;
+  for (int zi = 0; zi < (int)g_segLevel.segZsList.zsList.size(); zi++)
+  {
+    const CZS& zs = g_segLevel.segZsList.zsList[zi];
+    if (zs.isOneBiZs()) continue;
+
+    int kStart = biPts[zs.beginBiIdx].origIdx;
+    int kEnd   = (zs.endBiIdx + 1 < (int)biPts.size())
+               ? biPts[zs.endBiIdx + 1].origIdx
+               : biPts[zs.endBiIdx].origIdx;
+    if (kStart < 0) kStart = 0;
+    if (kEnd >= nCount) kEnd = nCount - 1;
+
+    for (int j = kStart; j <= kEnd; j++)
+    {
+      pOut[j] = zs.high;
+    }
+  }
+}
+
+//=============================================================================
+// 输出函数16号：线段级中枢低点数据
+// 数据源：g_segLevel.segZsList（线段级中枢）
+// 通达信公式: SZSL:="chan2026.dll"(16, BISIGNAL, HIGH, LOW);
+//=============================================================================
+
+void Func16(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
+{
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
+
+  for (int i = 0; i < nCount; i++) pOut[i] = 0;
+
+  const std::vector<BiPoint>& biPts = g_segLevel.segBiPoints;
+  for (int zi = 0; zi < (int)g_segLevel.segZsList.zsList.size(); zi++)
+  {
+    const CZS& zs = g_segLevel.segZsList.zsList[zi];
+    if (zs.isOneBiZs()) continue;
+
+    int kStart = biPts[zs.beginBiIdx].origIdx;
+    int kEnd   = (zs.endBiIdx + 1 < (int)biPts.size())
+               ? biPts[zs.endBiIdx + 1].origIdx
+               : biPts[zs.endBiIdx].origIdx;
+    if (kStart < 0) kStart = 0;
+    if (kEnd >= nCount) kEnd = nCount - 1;
+
+    for (int j = kStart; j <= kEnd; j++)
+    {
+      pOut[j] = zs.low;
+    }
+  }
+}
+
+//=============================================================================
+// 输出函数17号：线段级中枢起止信号
+// 数据源：g_segLevel.segZsList（线段级中枢）
+// 通达信公式: SZSS:="chan2026.dll"(17, BISIGNAL, HIGH, LOW);
+//=============================================================================
+
+void Func17(int nCount, float *pOut, float *pIn, float *pHigh, float *pLow)
+{
+  (void)pIn;
+  (void)pHigh;
+  (void)pLow;
+
+  for (int i = 0; i < nCount; i++) pOut[i] = 0;
+
+  const std::vector<BiPoint>& biPts = g_segLevel.segBiPoints;
+  for (int zi = 0; zi < (int)g_segLevel.segZsList.zsList.size(); zi++)
+  {
+    const CZS& zs = g_segLevel.segZsList.zsList[zi];
+    if (zs.isOneBiZs()) continue;
+
+    int kStart = biPts[zs.beginBiIdx].origIdx;
+    int kEnd   = (zs.endBiIdx + 1 < (int)biPts.size())
+               ? biPts[zs.endBiIdx + 1].origIdx
+               : biPts[zs.endBiIdx].origIdx;
+    if (kStart >= 0 && kStart < nCount) pOut[kStart] = 1;
+    if (kEnd >= 0 && kEnd < nCount)     pOut[kEnd]   = 2;
+  }
+}
+
+//=============================================================================
 // DLL 函数注册表
 //=============================================================================
 
@@ -474,6 +663,12 @@ static PluginTCalcFuncInfo Info[] =
   {9, &Func9},
   {10, &Func10},
   {11, &Func11},
+  {12, &Func12},
+  {13, &Func13},
+  {14, &Func14},
+  {15, &Func15},
+  {16, &Func16},
+  {17, &Func17},
   {0, NULL},
 };
 

@@ -1,0 +1,380 @@
+# TDX DLL 精确三类买卖点实现计划
+
+## 目标
+
+在 `tdx_dll` 中实现与 Python `chan.py` **一致的**三类买卖点信号（1 类/1P 类/2 类/2S 类/3a 类/3b 类）。
+
+## 现状差距分析
+
+> [!CAUTION]
+> 当前 DLL 的 Func5 买卖点实现**完全绕过了线段和 MACD 背驰**，仅做简单的价格比较，与 Python 端计算逻辑差异巨大。
+
+### Python 端买卖点计算数据流
+
+```mermaid
+graph TD
+    A["K线数据"] --> B["K线合并<br/>KLine_Combiner.py"]
+    B --> C["笔识别<br/>BiList.py"]
+    C --> D["线段识别<br/>SegListChan.py"]
+    D --> E["线段内中枢<br/>ZSList.cal_bi_zs()"]
+    C --> F["MACD 计算<br/>Math/MACD.py"]
+    E --> G["一类买卖点<br/>ZS.is_divergence()"]
+    F --> G
+    G --> H["二类买卖点<br/>treat_bsp2()"]
+    G --> I["三类买卖点<br/>treat_bsp3_after/before()"]
+
+    style B fill:#4CAF50,color:white
+    style C fill:#4CAF50,color:white
+    style D fill:#f44336,color:white
+    style E fill:#f44336,color:white
+    style F fill:#f44336,color:white
+    style G fill:#f44336,color:white
+    style H fill:#f44336,color:white
+    style I fill:#f44336,color:white
+```
+
+🟢 已实现 &nbsp; 🔴 未实现
+
+### DLL 现有模块 vs 精确买卖点所需
+
+| 所需模块 | DLL 现状 | 差距 |
+|---|---|---|
+| K线合并 + 笔识别 | ✅ `KLineCombiner.h` + `BiDetector.h` | 无 |
+| MACD 指标 | ❌ `ChanConfig.h` 标注"未实现" | 需新增 `CMACD.h` |
+| 线段识别 | ❌ 完全缺失 | 需新增 `SegDetector.h`（~300行） |
+| 线段内中枢 | ⚠️ `CCentroid` 仅做流式中枢 | 需重构为按线段分段计算 |
+| 一类买卖点 | ❌ | 需 MACD 背驰判断 |
+| 二/三类买卖点 | ⚠️ Func5 简化版 | 需基于线段+中枢完全重写 |
+
+---
+
+## 架构约束
+
+> [!IMPORTANT]
+> **通达信 DLL 接口限制**：每个导出函数只能输出一个 `float` 数组（`pOut`），输入最多 3 个数组。函数间通过通达信公式链式调用传递中间结果（Func1 输出笔 → Func2/3/4/5 输入笔）。
+
+**设计策略**：
+1. **Func1 保持不变**（笔标记输出）
+2. **新增 Func9**：线段标记输出（+2=线段向上终点，-2=向下终点）
+3. **重写 Func5**：基于笔+线段信息计算精确买卖点
+4. Func2/3/4/6/7/8 暂不修改
+
+---
+
+## 分阶段开发计划
+
+---
+
+### Phase 1: MACD 指标计算 (P0)
+
+> 对应 Python: [MACD.py](file:///m:/chan.py/Math/MACD.py) (30行) + [Bi.py](file:///m:/chan.py/Bi/Bi.py) `cal_macd_metric` 方法
+
+#### 收盘价传入方式
+
+已通过 [通达信 DLL 编程规范](file:///C:/Users/luyu4/OneDrive%20-%20zufe.edu.cn/1024机械大全/TDX/红宝书/通达信DLL函数编程规范/TestPluginTCale/PluginTCalcFunc.h) 确认：
+
+- DLL 函数签名固定为 `void Func(int nCount, float* pOut, float* pfINa, float* pfINb, float* pfINc)`
+- 3 个输入参数由通达信公式自由传入，当前 Func1 仅使用 `pfINa=HIGH, pfINb=LOW`
+- **收盘价通过 `pfINc` 传入**，通达信公式写法：`"chan2026.dll"(1, HIGH, LOW, CLOSE)`
+- 需要 MACD 的函数（如新版 Func5）可直接接收 `CLOSE` 数据
+
+> [!NOTE]
+> 当前 Func1 的 `pTime` 参数实际可改为传入 `CLOSE`，或在 Func5 中新增独立的 CLOSE 输入。考虑到向后兼容，建议**新函数**直接设计为 `Func5(nCount, pOut, pBiSignal, pHigh_or_Close, pLow)`。
+
+#### [NEW] CMACD.h
+
+MACD 的 EMA 计算在 C++ 中实现为递推式：
+
+```cpp
+struct CMACDItem {
+    float fast_ema, slow_ema, DIF, DEA, macd;
+};
+
+class CMACD {
+    int fastperiod, slowperiod, signalperiod;
+    std::vector<CMACDItem> items;
+public:
+    CMACD(int fast=12, int slow=26, int signal=9);
+    void add(float close);  // 逐K线递推
+    // 区间 MACD 指标：用于背驰判断
+    float cal_area(int startIdx, int endIdx);      // 面积
+    float cal_peak(int startIdx, int endIdx);      // 峰值
+    float cal_half_area(int startIdx, int endIdx, bool reverse); // 半面积
+};
+```
+
+**核心算法**（对应 Python `CMACD.add`）：
+- `fast_ema = (2 * close + (fast-1) * prev_fast_ema) / (fast+1)`
+- `slow_ema = (2 * close + (slow-1) * prev_slow_ema) / (slow+1)`
+- `DIF = fast_ema - slow_ema`
+- `DEA = (2 * DIF + (signal-1) * prev_DEA) / (signal+1)`
+- `MACD = 2 * (DIF - DEA)`
+
+**工作量**：~100 行，约 1 小时
+
+---
+
+### Phase 2: 线段识别 (P0)
+
+> 对应 Python: [SegListChan.py](file:///m:/chan.py/Seg/SegListChan.py) (77行) + [EigenFX.py](file:///m:/chan.py/Seg/EigenFX.py) (151行) + [Eigen.py](file:///m:/chan.py/Seg/Eigen.py) + [SegListComm.py](file:///m:/chan.py/Seg/SegListComm.py) (175行)
+
+**这是最复杂的模块**，Python 端 4 个文件共 ~460 行。
+
+#### [NEW] SegDetector.h
+
+```cpp
+// 特征序列元素（对应 Python Eigen.py）
+struct EigenElement {
+    int startBiIdx, endBiIdx;
+    float high, low;
+    // try_add: 合并逻辑
+};
+
+// 特征序列分型（对应 Python EigenFX.py）
+struct EigenFX {
+    int dir;  // 线段方向
+    EigenElement ele[3];
+    bool add(BiPoint& bi);
+    int GetPeakBiIdx();
+};
+
+// 线段点
+struct SegPoint {
+    int biIdx;      // 起/止笔索引
+    int origIdx;    // 映射回原始K线
+    int dir;        // 线段方向
+    bool is_sure;
+};
+
+// 线段识别器（对应 Python SegListChan.py）
+class CSegDetector {
+    std::vector<SegPoint> segPoints;
+    void detect(const std::vector<BiPoint>& biPoints,
+                const CKLineCombiner& combiner);
+    void cal_seg_sure(biPoints, begin_idx);
+    void collect_left_seg(biPoints);
+};
+```
+
+**核心算法步骤**（对应 `SegListChan.cal_seg_sure`）：
+1. 构建上升/下降特征序列（用反向笔构成 3 元素分型）
+2. 用 `EigenFX.add()` 逐笔添加，检测分型成立
+3. 分型成立 → 生成线段端点
+4. 剩余部分用 `collect_left_seg` 生成虚线段
+
+**工作量**：~350 行，约 4-5 小时
+
+> [!WARNING]
+> `EigenFX` 的合并逻辑（包含关系判断、gap 处理、`can_be_end` 验证）是 chan.py 中最精细的算法之一，需严格对照 Python 源码。
+
+---
+
+### Phase 3: 线段内中枢重构 (P0)
+
+> 对应 Python: [ZSList.py](file:///m:/chan.py/ZS/ZSList.py) `cal_bi_zs` 方法 + [ZS.py](file:///m:/chan.py/ZS/ZS.py) 完整属性
+
+#### [NEW] CZSList.h
+
+当前 `CCentroid` 是流式单中枢追踪器，但精确买卖点需要：
+- **按线段分段**计算中枢（`cal_bi_zs` 对每个 seg 独立处理）
+- 记录完整的中枢属性（`bi_in`, `bi_out`, `bi_lst`, `peak_high`, `peak_low`）
+- 支持中枢合并（`try_combine`）
+
+```cpp
+struct CZS {
+    int beginBiIdx, endBiIdx;
+    float high, low;           // 中枢区间 min(tops) / max(bots)
+    float peak_high, peak_low; // 中枢内笔的最大/最小值
+    int biInIdx;               // 进中枢笔
+    int biOutIdx;              // 出中枢笔 (-1=未出)
+    std::vector<int> bi_lst;   // 中枢内的笔索引列表
+    bool is_sure;
+    bool is_one_bi_zs();
+    bool in_range(float biHigh, float biLow);
+    bool combine(CZS& other, int mode);
+};
+
+class CZSList {
+    std::vector<CZS> zs_lst;
+    void cal_bi_zs(biPoints, segPoints, combiner);
+    // 按每个线段独立计算中枢
+    void add_zs_from_bi_range(seg_bi_lst, seg_dir);
+};
+```
+
+**与现有 `CCentroid` 的关系**：
+- `CCentroid` 保留用于 Func2/3/4 的流式中枢输出
+- `CZSList` 新增用于买卖点计算的精确中枢列表
+- 两者可共存，不影响已有功能
+
+**工作量**：~250 行，约 3 小时
+
+---
+
+### Phase 4: 一类买卖点 (P0)
+
+> 对应 Python: [BSPointList.py](file:///m:/chan.py/BuySellPoint/BSPointList.py) `treat_bsp1` + `treat_pz_bsp1`
+
+#### 一类买卖点（趋势背驰, BSP_TYPE.T1）
+
+算法（对应 `cal_single_bs1point` L163-173）：
+1. 遍历每个线段 `seg`
+2. 取线段末尾中枢 `last_zs = seg.zs_lst[-1]`
+3. 检查 `last_zs.bi_out` 存在且 `bi_out.idx >= seg.end_bi.idx`
+4. 调用 `ZS.is_divergence()`：比较进中枢笔 vs 出中枢笔的 MACD 指标
+5. 背驰成立 → 一类买卖点
+
+#### 一类买卖点 P（盘整背驰, BSP_TYPE.T1P）
+
+算法（对应 `treat_pz_bsp1` L186-205）：
+1. 最后一笔 `last_bi` 与前2笔 `pre_bi` 同方向
+2. 创新低/新高
+3. 比较两者 MACD 指标，背驰 → 1P 买卖点
+
+**工作量**：~80 行，约 1.5 小时
+
+---
+
+### Phase 5: 二类买卖点 (P1)
+
+> 对应 Python: `treat_bsp2` + `treat_bsp2s` (L216-277)
+
+算法：
+1. 找到一类买卖点所在笔 `bsp1_bi`（线段尾笔）
+2. `break_bi = bi[bsp1_bi.idx + 1]`（突破笔）
+3. `bsp2_bi = bi[bsp1_bi.idx + 2]`（回踩笔）
+4. `retrace_rate = bsp2_bi.amp() / break_bi.amp()`
+5. `retrace_rate <= MAX_BS2_RATE` → 二类买卖点
+
+**工作量**：~60 行，约 1 小时
+
+---
+
+### Phase 6: 三类买卖点 (P1)
+
+> 对应 Python: `treat_bsp3_after` (L305-344) + `treat_bsp3_before` (L346-374)
+
+#### 3a（中枢在一类买卖点之后）
+1. 取下一个线段 `next_seg` 的第一个多笔中枢 `first_zs`
+2. `first_zs.bi_out` 的下一笔为 `bsp3_bi`
+3. 检查 `bsp3_back2zs(bsp3_bi, zs)` → 未回到中枢区间
+4. 满足 → 三类买卖点 a
+
+#### 3b（中枢在一类买卖点之前）
+1. 取当前线段最后一个多笔中枢 `cmp_zs`
+2. 从 `bsp1_bi.idx+2` 开始找同向笔
+3. 检查 `bsp3_back2zs` → 未回到中枢区间
+4. 满足 → 三类买卖点 b
+
+**工作量**：~100 行，约 2 小时
+
+---
+
+### Phase 7: 集成与 Func 重写 (P0)
+
+#### [MODIFY] Main.cpp
+
+重写 Func5 和新增 Func9：
+
+```
+Func9(笔标记输入) → 线段标记输出
+  输出: +2=向上线段终点, -2=向下线段终点
+
+Func5(笔标记输入) → 精确买卖点信号
+  内部: 笔→线段→中枢→MACD→三类买卖点
+  输出编码:
+    1/11  = 一类买/卖点
+    1.5/11.5 = 一类P买/卖点  
+    2/12  = 二类买/卖点
+    2.5/12.5 = 二类S买/卖点
+    3/13  = 三类a买/卖点
+    3.5/13.5 = 三类b买/卖点
+```
+
+#### [MODIFY] Makefile
+
+新增 `.o` 目标。
+
+#### [MODIFY] Main.h
+
+新增 `#include` 引用。
+
+**工作量**：~150 行修改，约 2 小时
+
+---
+
+## 总体工作量预估
+
+| Phase | 优先级 | 预计代码量 | 预计时间 | 依赖 |
+|---|---|---|---|---|
+| Phase 1: MACD | P0 | ~100 行 | 1h | 无 |
+| Phase 2: 线段 | P0 | ~350 行 | 4-5h | Phase 1 (close数据) |
+| Phase 3: 中枢 | P0 | ~250 行 | 3h | Phase 2 |
+| Phase 4: 一类BSP | P0 | ~80 行 | 1.5h | Phase 1, 3 |
+| Phase 5: 二类BSP | P1 | ~60 行 | 1h | Phase 4 |
+| Phase 6: 三类BSP | P1 | ~100 行 | 2h | Phase 3, 4 |
+| Phase 7: 集成 | P0 | ~150 行修改 | 2h | 全部 |
+| **合计** | | **~1090 行** | **~15h** | |
+
+---
+
+## Python→C++ 关键对照表
+
+| Python | C++ 目标 | 核心差异点 |
+|---|---|---|
+| `CBi.cal_macd_metric()` | `CMACD::cal_area/peak()` | Python 遍历 KLU 的 MACD 值；C++ 需自行计算 |
+| `CEigenFX.add()` | `EigenFX::add()` | Python 用对象引用链；C++ 用索引 |
+| `CSegListChan.cal_seg_sure()` | `CSegDetector::detect()` | Python 递归调用自身；C++ 需改为迭代 |
+| `CZSList.cal_bi_zs()` | `CZSList::cal_bi_zs()` | Python 按 seg 切分；C++ 同理 |
+| `CZS.is_divergence()` | 内联在 BSP 计算中 | MACD 指标比较 |
+| `CSeg.zs_lst` | `SegPoint.zs_indices[]` | C++ 用索引关联 |
+
+---
+
+## 验证方案
+
+### 自动化验证（基于 TdxLocalAPI + 000300 Index）
+
+利用项目已有 [TdxLocalAPI.py](file:///m:/chan.py/DataAPI/TdxLocalAPI.py) 读取本地通达信 000300 数据，模拟通达信数据传输机制，实现 Python↔DLL 结果的逐项对比。
+
+#### 验证脚本设计
+
+```
+# [NEW] tdx_dll/test_dll_accuracy.py
+
+步骤1: 用 TdxLocalAPI 加载 000300 日线数据 → 得到 OHLCV 数组
+步骤2: 用 chan.py (CChan + CChanConfig) 完整计算 → 提取笔/线段/中枢/买卖点
+步骤3: 用 ctypes 加载 chan2026.dll → 传入 High/Low/Close 数组调用各 Func
+步骤4: 逐项对比结果，输出差异报告
+```
+
+#### 测试数据集
+
+| 标的 | 特征 | 用途 |
+|---|---|---|
+| 000300 日线 | 标准趋势+震荡 | 主要验证 |
+| 000300 30分钟 | 更多笔/线段 | 边界条件验证 |
+| 可选：极端个股 | 跳空/涨停/长停牌 | 异常情况验证 |
+
+#### 对比项
+
+```python
+assert dll_bi_points == python_bi_points      # 笔端点位置一致
+assert dll_seg_points == python_seg_points    # 线段端点一致
+assert dll_zs_ranges == python_zs_ranges      # 中枢区间一致
+assert dll_bsp_signals == python_bsp_signals  # 买卖点类型+位置一致
+```
+
+### 编译验证
+
+每个 Phase 完成后执行 `make clean && make`，确保无编译错误。
+
+### 逐阶段验证检查点
+
+| Phase | 验证方法 |
+|---|---|
+| Phase 1 | MACD DIF/DEA/MACD 值与 Python `CMACD.add()` 输出逐 K 线对比 |
+| Phase 2 | 线段端点索引列表与 Python `SegListChan` 输出完全一致 |
+| Phase 3 | 中枢 high/low/bi_in/bi_out 与 Python `ZSList` 逐中枢对比 |
+| Phase 4-6 | 买卖点类型(T1/T1P/T2/T2S/T3A/T3B)+位置与 Python 完全一致 |
+| Phase 7 | 全链路端到端：传入 000300 原始数据 → 输出与 Python 100% 一致的买卖点 |
